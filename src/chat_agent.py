@@ -1,482 +1,46 @@
-"""Chat agent - main conversational interface with hybrid LLM."""
+"""Chat agent - post-first flow with persistent storage."""
 
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from datetime import datetime
 
 from .config import AgentConfig
 from .resource_loader import UserResources
 from .humanizer import Humanizer
-from .discovery import OpportunityDiscovery, Opportunity
 from .writer import EmailWriter, GeneratedEmail
 from .cv_extractor import CVExtractor, ExtractedCV
 from .rag_store import RAGStore, ApplicationPost, PostProcessor
 from .ocr_processor import OCRProcessor
 from .email_sender import EmailSender, EmailConfig
-from .intent_detector import IntentDetector, Intent, DetectedIntent
 from .hybrid_llm import HybridLLM, LLMConfig
 
 RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 
+
 class ChatAgent:
-    """Conversational agent with hybrid LLM routing."""
-    
     def __init__(self):
         self.config = AgentConfig.load()
-        self.resources = UserResources.load(RESOURCES_DIR)
         self.humanizer = Humanizer(level="high")
         self.llm = HybridLLM()
-        self.writer = EmailWriter(self.resources, self.humanizer, self.llm)
         self.cv_extractor = CVExtractor()
         self.rag_store = RAGStore()
         self.post_processor = PostProcessor()
         self.ocr = OCRProcessor()
         self.email_sender = EmailSender()
-        self.intent_detector = IntentDetector()
-        
-        self.conversation_history: List[Dict] = []
-        self.pending_email: Optional[GeneratedEmail] = None
-        self.pending_post_text: Optional[str] = None
-        self.context: Dict = {}
-    
-    def chat(self, user_message: str) -> str:
-        """Process user message and return response."""
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_message,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        intent = self.intent_detector.detect(user_message)
-        
-        response = self._handle_intent(intent, user_message)
-        
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": response,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        return response
-    
-    def handle_file_upload(self, filename: str, file_bytes: bytes, file_type: str) -> str:
-        """Handle file uploads."""
-        if file_type in ["pdf", "docx", "txt"]:
-            return self._handle_cv_upload(filename, file_bytes, file_type)
-        elif file_type in ["png", "jpg", "jpeg"]:
-            return self._handle_image_upload(filename, file_bytes)
-        else:
-            return f"Unsupported file type: {file_type}"
-    
-    def _handle_intent(self, intent: DetectedIntent, text: str) -> str:
-        """Route to appropriate handler."""
-        handlers = {
-            Intent.CV_UPLOAD: lambda: self._handle_cv_request(text),
-            Intent.CV_EXTRACT: lambda: self._handle_cv_extract(),
-            Intent.ADD_POST: lambda: self._handle_add_post(text),
-            Intent.ADD_POST_IMAGE: lambda: "Please upload an image using the file uploader below.",
-            Intent.SEARCH_POSTS: lambda: self._handle_search_posts(text),
-            Intent.WRITE_EMAIL: lambda: self._handle_write_email(intent.entities, text),
-            Intent.APPLY_SCHOLARSHIP: lambda: self._handle_apply("scholarship"),
-            Intent.APPLY_PHD: lambda: self._handle_apply("phd_position"),
-            Intent.SEND_EMAIL: lambda: self._handle_send_email(),
-            Intent.SETUP_SMTP: lambda: self._handle_setup_smtp(text),
-            Intent.SHOW_SAVED: lambda: self._handle_show_saved(),
-            Intent.HELP: lambda: self._handle_help(),
-            Intent.PROFILE_UPDATE: lambda: self._handle_profile_update(text),
-            Intent.GENERAL_CHAT: lambda: self._handle_general(text),
-        }
-        
-        handler = handlers.get(intent.intent, handlers[Intent.GENERAL_CHAT])
-        return handler()
-    
-    def _handle_cv_request(self, text: str) -> str:
-        """Handle CV upload request."""
-        return ("Please upload your CV using the file uploader below.\n\n"
-                "Supported formats: PDF, DOCX, TXT\n\n"
-                "I'll automatically extract all your information.")
-    
-    def _handle_cv_upload(self, filename: str, file_bytes: bytes, file_type: str) -> str:
-        """Process uploaded CV file."""
-        try:
-            temp_path = RESOURCES_DIR / f"temp_cv.{file_type}"
-            temp_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_bytes(file_bytes)
-            
-            extracted = self.cv_extractor.extract_from_file(temp_path)
-            temp_path.unlink(missing_ok=True)
-            
-            self.context['extracted_cv'] = extracted
-            
-            response = f"**CV Extracted Successfully!**\n\n"
-            response += f"**Name:** {extracted.name}\n"
-            response += f"**Email:** {extracted.email}\n"
-            response += f"**Phone:** {extracted.phone}\n\n"
-            
-            if extracted.education:
-                response += "**Education:**\n"
-                for edu in extracted.education[:3]:
-                    response += f"- {edu.get('degree', 'N/A')} from {edu.get('institution', 'N/A')}\n"
-            
-            if extracted.skills:
-                response += f"\n**Skills:** {', '.join(extracted.skills[:10])}\n"
-            
-            if extracted.experience:
-                response += "\n**Experience:**\n"
-                for exp in extracted.experience[:3]:
-                    response += f"- {exp.get('title', 'N/A')} at {exp.get('organization', 'N/A')}\n"
-            
-            response += "\nWould you like me to save this to your profile? (Type 'yes' to save)"
-            
-            return response
-        
-        except Exception as e:
-            return f"Failed to extract CV: {str(e)}\n\nPlease try uploading again."
-    
-    def _handle_cv_extract(self) -> str:
-        """Show extracted CV data."""
-        if 'extracted_cv' in self.context:
-            cv = self.context['extracted_cv']
-            return cv.to_context_string()
-        elif self.resources.name:
-            return self.resources.to_context_string()
-        else:
-            return "No CV data found. Please upload your CV first."
-    
-    def _handle_add_post(self, text: str) -> str:
-        """Handle adding a new post."""
-        self.pending_post_text = text
-        return ("Please paste the full scholarship/position announcement text, "
-                "or upload an image/screenshot of the post.\n\n"
-                "You can also just paste the text directly in the chat.")
-    
-    def _handle_image_upload(self, filename: str, file_bytes: bytes) -> str:
-        """Process uploaded image with OCR."""
-        if not self.ocr.is_available():
-            return ("OCR is not installed. Please install it:\n"
-                    "```bash\n"
-                    "sudo apt-get install tesseract-ocr\n"
-                    "pip install pytesseract Pillow\n"
-                    "```")
-        
-        try:
-            ocr_text = self.ocr.extract_text_from_bytes(file_bytes, filename)
-            
-            if not ocr_text.strip():
-                return "No text found in the image. Please try a clearer image."
-            
-            post = self.post_processor.process_image_text(ocr_text)
-            post_id = self.rag_store.add_post(post)
-            
-            response = f"**Image processed and post saved!**\n\n"
-            response += f"**Extracted Text:**\n{ocr_text[:500]}\n\n"
-            response += f"**Post ID:** {post_id}\n\n"
-            response += "Would you like me to apply to this? (Type 'apply' to proceed)"
-            
-            self.context['last_post_id'] = post_id
-            
-            return response
-        
-        except Exception as e:
-            return f"Failed to process image: {str(e)}"
-    
-    def _handle_search_posts(self, text: str) -> str:
-        """Search saved posts."""
-        query = re.sub(r'(?:search|find|look|for|saved|posts?|scholarships?|positions?)', '', text, flags=re.IGNORECASE).strip()
-        
-        if not query:
-            query = "scholarship PhD position"
-        
-        results = self.rag_store.search(query, n_results=5)
-        
-        if not results:
-            return "No saved posts found. Add some posts first using 'add post' command."
-        
-        response = f"**Found {len(results)} relevant posts:**\n\n"
-        
-        for i, result in enumerate(results, 1):
-            meta = result.get("metadata", {})
-            score = result.get("score", 0)
-            response += f"**{i}. {meta.get('title', 'Untitled')}**\n"
-            response += f"   Institution: {meta.get('institution', 'N/A')}\n"
-            response += f"   Type: {meta.get('post_type', 'N/A')}\n"
-            if meta.get('deadline'):
-                response += f"   Deadline: {meta['deadline']}\n"
-            response += f"   Relevance: {score:.2f}\n\n"
-        
-        response += "Type 'apply 1' or 'apply 2' etc. to apply to a specific post."
-        
-        return response
-    
-    def _handle_write_email(self, entities: Dict, text: str) -> str:
-        """Handle email writing request using hybrid LLM."""
-        prof_name = entities.get('professor_name', '')
-        prof_email = entities.get('email', '')
-        
-        if not prof_name:
-            return ("Who would you like to email?\n\n"
-                    "Please provide:\n"
-                    "- Professor's name (e.g., 'Dr. Smith' or 'Professor John Smith')\n"
-                    "- Their email address\n"
-                    "- What you want to discuss\n\n"
-                    "Example: 'Write email to Dr. Smith at smith@mit.edu about ML research'")
-        
-        if not prof_email:
-            return f"What is Professor {prof_name}'s email address?"
-        
-        research_topic = ""
-        topic_match = re.search(r'(?:about|regarding|for|in)\s+(.+?)(?:\.|$)', text, re.IGNORECASE)
-        if topic_match:
-            research_topic = topic_match.group(1).strip()
-        
-        # Generate email with hybrid LLM
-        generated = self.writer.write_professor_email(
-            prof_name, prof_email, research_topic or "research opportunities"
-        )
-        
-        self.pending_email = generated
-        
-        # Get AI analysis
-        ai_score = generated.ai_analysis.get("ai_score", "N/A") if generated.ai_analysis else "N/A"
-        
-        response = f"**Email drafted for Professor {prof_name}**\n\n"
-        response += f"**To:** {generated.to_email}\n"
-        response += f"**Subject:** {generated.subject}\n"
-        response += f"**AI Detection Score:** {ai_score}/100\n\n"
-        response += "---\n\n"
-        response += generated.body
-        response += "\n\n---\n\n"
-        
-        # Show model status
-        llm_status = self.llm.get_status()
-        if llm_status['local_available']:
-            response += "*Drafted with local Qwen 2.5 + humanized with Groq*\n\n"
-        elif llm_status['groq_configured']:
-            response += "*Generated with Groq API*\n\n"
-        
-        if self.email_sender.is_configured():
-            response += "Type 'send' to send this email, or 'edit' to modify it."
-        else:
-            response += "Type 'setup email' to configure email sending, or copy the email above."
-        
-        return response
-    
-    def _handle_apply(self, post_type: str) -> str:
-        """Handle scholarship/PhD application."""
-        posts = self.rag_store.get_all_posts()
-        relevant = [p for p in posts if p.get("metadata", {}).get("post_type") == post_type]
-        
-        if not relevant:
-            return f"No saved {post_type} posts found. Add some first using 'add post'."
-        
-        if len(relevant) == 1:
-            post = relevant[0]
-            meta = post.get("metadata", {})
-            
-            post_obj = ApplicationPost(
-                id=post["id"],
-                title=meta.get("title", ""),
-                institution=meta.get("institution", ""),
-                content=post.get("content", ""),
-                post_type=post_type,
-                deadline=meta.get("deadline", "")
-            )
-            
-            generated = self.writer.write_scholarship_application(post_obj)
-            self.pending_email = generated
-            
-            response = f"**Application written for: {meta.get('title', 'Untitled')}**\n\n"
-            response += f"**To:** {generated.to_email or 'N/A'}\n"
-            response += f"**Subject:** {generated.subject}\n\n"
-            response += "---\n\n"
-            response += generated.body
-            response += "\n\n---\n\n"
-            response += "Type 'send' to send, or 'edit' to modify."
-            
-            return response
-        
-        response = f"**Found {len(relevant)} {post_type} posts:**\n\n"
-        for i, p in enumerate(relevant, 1):
-            meta = p.get("metadata", {})
-            response += f"{i}. {meta.get('title', 'Untitled')} - {meta.get('institution', 'N/A')}\n"
-        
-        response += "\nType 'apply 1', 'apply 2', etc. to select one."
-        
-        return response
-    
-    def _handle_send_email(self) -> str:
-        """Send the pending email."""
-        if not self.pending_email:
-            return "No email ready to send. Write an email first."
-        
-        if not self.email_sender.is_configured():
-            return ("Email not configured. Please set up SMTP first.\n\n"
-                    "Type 'setup email' to configure.\n\n"
-                    "Or copy the email above and send it manually.")
-        
-        result = self.email_sender.send_email(
-            to_email=self.pending_email.to_email,
-            subject=self.pending_email.subject,
-            body=self.pending_email.body,
-            from_name=self.resources.name
-        )
-        
-        if result['success']:
-            self.pending_email = None
-            return f"**Email sent successfully!**\n\nTo: {result['to']}\nSubject: {result['subject']}"
-        else:
-            return f"**Failed to send email:** {result['error']}"
-    
-    def _handle_setup_smtp(self, text: str) -> str:
-        """Setup SMTP configuration."""
-        if 'gmail' in text.lower():
-            server = "smtp.gmail.com"
-            port = 587
-        elif 'outlook' in text.lower() or 'hotmail' in text.lower():
-            server = "smtp-mail.outlook.com"
-            port = 587
-        elif 'yahoo' in text.lower():
-            server = "smtp.mail.yahoo.com"
-            port = 587
-        else:
-            return ("What email provider do you use?\n\n"
-                    "- Gmail\n"
-                    "- Outlook/Hotmail\n"
-                    "- Yahoo\n"
-                    "- Other (provide SMTP server)")
-        
-        return (f"**Configure {server}**\n\n"
-                "Please provide:\n"
-                "1. Your email address\n"
-                "2. Your password or app-specific password\n\n"
-                "**Note for Gmail:** You need to use an App Password.\n"
-                "Generate one at: https://myaccount.google.com/apppasswords\n\n"
-                "Type: 'email: your@email.com password: yourpassword'")
-    
-    def _handle_show_saved(self) -> str:
-        """Show saved emails."""
-        return ("**Saved Emails:**\n\n"
-                "Emails are saved in the `resources/saved_responses/` folder.\n\n"
-                "To view them, check the folder directly.")
-    
-    def _handle_help(self) -> str:
-        """Show help message with model status."""
-        llm_status = self.llm.get_status()
-        
-        response = "**Here's what I can do:**\n\n"
-        
-        response += "**🤖 Model Status:**\n"
-        response += f"- Local Qwen 2.5: {'✅ Running' if llm_status['local_available'] else '❌ Not running'}\n"
-        response += f"- Groq API: {'✅ Configured' if llm_status['groq_configured'] else '❌ Not configured'}\n\n"
-        
-        response += "**📄 CV Management:**\n"
-        response += "- Upload CV → 'upload cv' or just upload a file\n"
-        response += "- Extract info → 'extract from cv'\n\n"
-        
-        response += "**📝 Posts & Opportunities:**\n"
-        response += "- Add post → 'add scholarship' or paste text\n"
-        response += "- Add from image → upload image\n"
-        response += "- Search posts → 'search posts about machine learning'\n\n"
-        
-        response += "**✉️ Email:**\n"
-        response += "- Write email → 'write email to Dr. Smith at smith@mit.edu'\n"
-        response += "- Apply → 'apply to scholarship' or 'apply for PhD'\n"
-        response += "- Send email → 'send' (after writing)\n\n"
-        
-        response += "**⚙️ Settings:**\n"
-        response += "- Setup email → 'setup email gmail'\n"
-        response += "- Setup Groq → 'setup groq [api_key]'\n"
-        response += "- Update profile → 'update my name to John'\n\n"
-        
-        response += "**Just tell me what you want to do in plain language!**"
-        
-        return response
-    
-    def _handle_profile_update(self, text: str) -> str:
-        """Handle profile updates."""
-        name_match = re.search(r'(?:name|called)\s+(?:to\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', text)
-        if name_match:
-            self.resources.name = name_match.group(1)
-            self._save_resources()
-            return f"Name updated to: {self.resources.name}"
-        
-        email_match = re.search(r'(?:email|mail)\s+(?:to\s+)?([\w.-]+@[\w.-]+\.\w+)', text)
-        if email_match:
-            self.resources.email = email_match.group(1)
-            self._save_resources()
-            return f"Email updated to: {self.resources.email}"
-        
-        groq_match = re.search(r'setup\s+groq\s+(\S+)', text)
-        if groq_match:
-            api_key = groq_match.group(1)
-            self.llm.config.groq_api_key = api_key
-            self.llm.config.save()
-            return "Groq API configured! You can now use Groq for humanization."
-        
-        return ("What would you like to update?\n\n"
-                "- 'update my name to [name]'\n"
-                "- 'update my email to [email]'\n"
-                "- 'setup groq [api_key]'")
-    
-    def _handle_general(self, text: str) -> str:
-        """Handle general conversation."""
-        text_lower = text.lower()
-        
-        if any(word in text_lower for word in ['hello', 'hi', 'hey', 'greetings']):
-            llm_status = self.llm.get_status()
-            models = []
-            if llm_status['local_available']:
-                models.append("Local Qwen 2.5")
-            if llm_status['groq_configured']:
-                models.append("Groq API")
-            
-            model_str = ", ".join(models) if models else "No LLM configured"
-            
-            return (f"Hello{(' ' + self.resources.name) if self.resources.name else ''}! 👋\n\n"
-                    "I'm your Scholarship Application Agent.\n\n"
-                    f"**Active Models:** {model_str}\n\n"
-                    "I can help you:\n"
-                    "- Upload and parse your CV\n"
-                    "- Save scholarship/position announcements\n"
-                    "- Write humanized emails to professors\n"
-                    "- Apply to scholarships automatically\n\n"
-                    "What would you like to do?")
-        
-        if any(word in text_lower for word in ['thank', 'thanks']):
-            return "You're welcome! Let me know if you need anything else."
-        
-        if 'yes' in text_lower and 'extracted_cv' in self.context:
-            cv = self.context['extracted_cv']
-            user_data = cv.to_dict()
-            user_data["research_interests"] = []
-            user_data["target_universities"] = []
-            
-            RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
-            with open(RESOURCES_DIR / "user_data.json", "w") as f:
-                json.dump(user_data, f, indent=2)
-            
-            self.resources = UserResources.load(RESOURCES_DIR)
-            self.writer = EmailWriter(self.resources, self.humanizer, self.llm)
-            
-            return "CV data saved to your profile! You can now use it for applications."
-        
-        if self.pending_post_text and len(text.split()) > 5:
-            post = self.post_processor.process_text(self.pending_post_text + "\n" + text)
-            post_id = self.rag_store.add_post(post)
-            self.pending_post_text = None
-            return f"Post saved with ID: {post_id}\n\nType 'apply' to apply to this, or 'search posts' to find more."
-        
-        return ("I'm not sure what you mean. Type 'help' to see what I can do.\n\n"
-                "Or just tell me naturally:\n"
-                "- 'upload my CV'\n"
-                "- 'write email to professor'\n"
-                "- 'apply for scholarship'\n"
-                "- 'add this post'")
-    
+        self.resources = self._load_persistent_resources()
+        self.writer = EmailWriter(self.resources, self.humanizer, self.llm)
+        self.conversation_history = []
+        self.current_post = None
+        self.pending_email = None
+        self.flow_state = "idle"
+        self.context = {}
+
+    def _load_persistent_resources(self):
+        return UserResources.load(RESOURCES_DIR)
+
     def _save_resources(self):
-        """Save resources to file."""
         user_data = {
             "name": self.resources.name,
             "email": self.resources.email,
@@ -487,9 +51,367 @@ class ChatAgent:
             "experience": self.resources.experience,
             "publications": self.resources.publications,
             "awards": self.resources.awards,
-            "target_universities": self.resources.target_universities
+            "target_universities": self.resources.target_universities,
         }
-        
         RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
         with open(RESOURCES_DIR / "user_data.json", "w") as f:
             json.dump(user_data, f, indent=2)
+
+    def chat(self, user_message):
+        self.conversation_history.append({"role": "user", "content": user_message})
+
+        if self.flow_state == "waiting_cv":
+            response = self._handle_cv_response(user_message)
+        elif self.flow_state == "waiting_send":
+            response = self._handle_send_response(user_message)
+        elif self.flow_state == "waiting_clarification":
+            response = self._handle_clarification_response(user_message)
+        else:
+            response = self._handle_new_message(user_message)
+
+        self.conversation_history.append({"role": "assistant", "content": response})
+        return response
+
+    def handle_file_upload(self, filename, file_bytes, file_type):
+        if file_type in ["pdf", "docx", "txt"]:
+            return self._process_cv_upload(filename, file_bytes, file_type)
+        elif file_type in ["png", "jpg", "jpeg"]:
+            return self._process_image_upload(filename, file_bytes)
+        return f"Unsupported file type: {file_type}"
+
+    def _handle_new_message(self, message):
+        ml = message.lower()
+
+        post_kw = [
+            "phd", "msc", "master", "research assistant", "teaching assistant",
+            "graduate", "fellowship", "scholarship", "position", "opening",
+            "apply", "deadline", "supervisor", "lab", "department",
+        ]
+        is_post = any(kw in ml for kw in post_kw) and len(message.split()) > 20
+
+        if is_post:
+            return self._process_post(message)
+
+        if any(w in ml for w in ["hello", "hi", "hey"]):
+            return self._handle_greeting()
+
+        if any(w in ml for w in ["help", "what can you do"]):
+            return self._handle_help()
+
+        if any(w in ml for w in ["cv", "resume", "profile", "my info", "status"]):
+            return self._show_status()
+
+        if any(w in ml for w in ["write", "draft", "generate", "apply"]):
+            return self._handle_write()
+
+        if any(w in ml for w in ["send"]):
+            return self._handle_send()
+
+        if any(w in ml for w in ["setup email", "configure email", "smtp"]):
+            return self._handle_setup_email(message)
+
+        if any(w in ml for w in ["setup groq", "api key"]):
+            return self._handle_setup_groq(message)
+
+        return ("Please paste the scholarship/position announcement, or upload a screenshot.\n\n"
+                "I'll parse it and guide you through the application.")
+
+    def _process_post(self, text):
+        post = self.post_processor.process_text(text)
+
+        self.current_post = {
+            "title": post.title,
+            "institution": post.institution,
+            "content": post.content,
+            "deadline": post.deadline,
+            "requirements": post.requirements,
+            "type": post.post_type,
+        }
+
+        has_cv = bool(self.resources.name and self.resources.email)
+
+        resp = f"**Found: {post.title}**\n"
+        if post.institution:
+            resp += f"**Institution:** {post.institution}\n"
+        if post.deadline:
+            resp += f"**Deadline:** {post.deadline}\n"
+        resp += "\n"
+
+        needs = self._analyze_requirements(post.content)
+
+        if not has_cv:
+            self.flow_state = "waiting_cv"
+            resp += "I don't have your CV yet. Please upload it so I can personalize the application."
+        elif needs.get("needs_clarification"):
+            self.flow_state = "waiting_clarification"
+            resp += needs["clarification_question"]
+        else:
+            resp += "I have your profile. Type **'write'** to generate the email/application."
+            self.flow_state = "idle"
+
+        rag_post = ApplicationPost(
+            id="", title=post.title, institution=post.institution,
+            content=post.content, post_type=post.post_type,
+            deadline=post.deadline, requirements=post.requirements,
+        )
+        self.rag_store.add_post(rag_post)
+        return resp
+
+    def _analyze_requirements(self, post_content):
+        needs = {
+            "needs_research_statement": False,
+            "needs_proposal": False,
+            "needs_clarification": False,
+            "clarification_question": "",
+        }
+        cl = post_content.lower()
+
+        if "research statement" in cl or "research plan" in cl:
+            needs["needs_research_statement"] = True
+            needs["needs_clarification"] = True
+            needs["clarification_question"] = (
+                "This position requires a research statement.\n\n"
+                "Please describe your research interests and plans, "
+                "or I can draft one based on your CV."
+            )
+        elif "proposal" in cl:
+            needs["needs_proposal"] = True
+            needs["needs_clarification"] = True
+            needs["clarification_question"] = (
+                "This position requires a research proposal.\n\n"
+                "Do you have one ready, or should I draft one?"
+            )
+        return needs
+
+    def _handle_cv_response(self, message):
+        if "upload" in message.lower() or "here" in message.lower():
+            return "Please use the file uploader below to send your CV (PDF, DOCX, or TXT)."
+        self.flow_state = "idle"
+        return "Okay. Upload your CV anytime, or type 'write' to continue."
+
+    def _handle_send_response(self, message):
+        ml = message.lower()
+        if any(w in ml for w in ["yes", "send", "go", "sure"]):
+            if self.pending_email and self.email_sender.is_configured():
+                result = self.email_sender.send_email(
+                    to_email=self.pending_email.to_email,
+                    subject=self.pending_email.subject,
+                    body=self.pending_email.body,
+                    from_name=self.resources.name,
+                )
+                self.pending_email = None
+                self.flow_state = "idle"
+                self.current_post = None
+                if result["success"]:
+                    return f"**Email sent to {result['to']}!**\n\nSend another post anytime."
+                return f"**Failed:** {result['error']}\n\nCopy the email above and send manually."
+            self.flow_state = "idle"
+            return "Email not configured. Copy the email above and send it manually."
+        if any(w in ml for w in ["no", "cancel", "edit"]):
+            self.flow_state = "idle"
+            return "Okay. What would you like to change?"
+        return "Type **'send'** to send, **'edit'** to modify, or **'cancel'**."
+
+    def _handle_clarification_response(self, message):
+        self.context["clarification"] = message
+        self.flow_state = "idle"
+        if self.current_post:
+            return "Got it. Type **'write'** to generate the email/application."
+        return "Saved. What would you like to do next?"
+
+    def _process_cv_upload(self, filename, file_bytes, file_type):
+        try:
+            temp_path = RESOURCES_DIR / f"temp_cv.{file_type}"
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(file_bytes)
+            extracted = self.cv_extractor.extract_from_file(temp_path)
+            temp_path.unlink(missing_ok=True)
+
+            if extracted.name:
+                self.resources.name = extracted.name
+            if extracted.email:
+                self.resources.email = extracted.email
+            if extracted.phone:
+                self.resources.phone = extracted.phone
+            if extracted.skills:
+                self.resources.skills = extracted.skills
+            if extracted.education:
+                self.resources.education = extracted.education
+            if extracted.experience:
+                self.resources.experience = extracted.experience
+            if extracted.publications:
+                self.resources.publications = extracted.publications
+            if extracted.awards:
+                self.resources.awards = extracted.awards
+
+            self._save_resources()
+            self.writer = EmailWriter(self.resources, self.humanizer, self.llm)
+
+            resp = "**CV uploaded and saved!**\n\n"
+            resp += f"- Name: {extracted.name}\n"
+            resp += f"- Email: {extracted.email}\n"
+            if extracted.skills:
+                resp += f"- Skills: {', '.join(extracted.skills[:8])}\n"
+
+            if self.current_post:
+                resp += "\nReady to write. Type **'write'** to generate."
+                self.flow_state = "idle"
+            else:
+                resp += "\nNow paste a scholarship/position post to apply."
+                self.flow_state = "idle"
+
+            return resp
+        except Exception as e:
+            return f"Failed to extract CV: {e}\n\nPlease try again."
+
+    def _process_image_upload(self, filename, file_bytes):
+        if not self.ocr.is_available():
+            return ("OCR not installed. Run:\n"
+                    "```\nsudo apt-get install tesseract-ocr\npip install pytesseract Pillow\n```")
+        try:
+            ocr_text = self.ocr.extract_text_from_bytes(file_bytes, filename)
+            if not ocr_text.strip():
+                return "No text found in the image. Try a clearer image."
+            return self._process_post(ocr_text)
+        except Exception as e:
+            return f"Failed to process image: {e}"
+
+    def _handle_write(self):
+        if not self.current_post:
+            return "No post loaded. Paste a scholarship/position announcement first."
+
+        if not self.resources.name:
+            self.flow_state = "waiting_cv"
+            return "I need your CV first. Please upload it."
+
+        clarification = self.context.get("clarification", "")
+
+        post_obj = ApplicationPost(
+            id="", title=self.current_post["title"],
+            institution=self.current_post["institution"],
+            content=self.current_post["content"],
+            post_type=self.current_post["type"],
+            deadline=self.current_post["deadline"],
+            requirements=self.current_post["requirements"],
+        )
+
+        generated = self.writer.write_scholarship_application(post_obj, clarification or None)
+        self.pending_email = generated
+        self.flow_state = "waiting_send"
+
+        llm_status = self.llm.get_status()
+        model_info = ""
+        if llm_status["local_available"] and llm_status["groq_configured"]:
+            model_info = "*Local Llama drafted + Groq humanized*"
+        elif llm_status["groq_configured"]:
+            model_info = "*Groq API*"
+        elif llm_status["local_available"]:
+            model_info = "*Local Llama*"
+
+        resp = f"**To:** {generated.to_email or '(email not in post)'}\n"
+        resp += f"**Subject:** {generated.subject}\n"
+        if model_info:
+            resp += f"_{model_info}_\n"
+        resp += "\n---\n\n"
+        resp += generated.body
+        resp += "\n\n---\n\n"
+        resp += "Type **'send'** to send, **'edit'** to modify, or **'cancel'**."
+
+        return resp
+
+    def _handle_send(self):
+        if not self.pending_email:
+            return "No email ready. Paste a post first, then type 'write'."
+        if not self.email_sender.is_configured():
+            return ("Email not configured. Type **'setup email gmail'** to set up.\n\n"
+                    "Or copy the email above and send manually.")
+        result = self.email_sender.send_email(
+            to_email=self.pending_email.to_email,
+            subject=self.pending_email.subject,
+            body=self.pending_email.body,
+            from_name=self.resources.name,
+        )
+        self.pending_email = None
+        self.flow_state = "idle"
+        self.current_post = None
+        if result["success"]:
+            return f"**Email sent to {result['to']}!**"
+        return f"**Failed:** {result['error']}"
+
+    def _handle_setup_email(self, message):
+        ml = message.lower()
+        if "gmail" in ml:
+            server, port = "smtp.gmail.com", 587
+        elif "outlook" in ml:
+            server, port = "smtp-mail.outlook.com", 587
+        else:
+            return "Which provider? Type 'setup email gmail', 'outlook', or 'yahoo'."
+
+        return (f"**Configure {server}**\n\n"
+                "Type: `email: your@email.com password: your-app-password`\n\n"
+                "_Gmail: use App Password from https://myaccount.google.com/apppasswords_")
+
+    def _handle_setup_groq(self, message):
+        match = re.search(r"setup\s+groq\s+(\S+)", message)
+        if match:
+            self.llm.config.groq_api_key = match.group(1)
+            self.llm.config.save()
+            return "**Groq configured!** Now both Local Llama and Groq will work together."
+        return "Type: `setup groq gsk_your_api_key`"
+
+    def _handle_greeting(self):
+        name = self.resources.name or ""
+        has_cv = bool(name)
+        llm = self.llm.get_status()
+
+        resp = f"Hello{' ' + name if name else ''}!\n\n"
+        resp += "Paste a scholarship/position post (text or image) to get started.\n\n"
+
+        if has_cv:
+            resp += f"_CV loaded: {name}_\n"
+        else:
+            resp += "_No CV loaded yet — I'll ask when needed._\n"
+
+        models = []
+        if llm["local_available"]:
+            models.append("Local Llama")
+        if llm["groq_configured"]:
+            models.append("Groq")
+        if models:
+            resp += f"_Models: {', '.join(models)}_"
+
+        return resp
+
+    def _handle_help(self):
+        return ("**How it works:**\n\n"
+                "1. Paste a post (text or screenshot)\n"
+                "2. Upload your CV if needed\n"
+                "3. I write the email\n"
+                "4. You send it\n\n"
+                "**Commands:**\n"
+                "- `status` — show your profile\n"
+                "- `setup email gmail` — configure sending\n"
+                "- `setup groq KEY` — add Groq API\n"
+                "- `write` — generate email for loaded post\n"
+                "- `send` — send the drafted email")
+
+    def _show_status(self):
+        resp = "**Your Profile:**\n\n"
+        resp += f"- Name: {self.resources.name or 'Not set'}\n"
+        resp += f"- Email: {self.resources.email or 'Not set'}\n"
+        resp += f"- Phone: {self.resources.phone or 'Not set'}\n"
+        if self.resources.skills:
+            resp += f"- Skills: {', '.join(self.resources.skills[:8])}\n"
+        if self.resources.education:
+            for e in self.resources.education[:2]:
+                resp += f"- {e.get('degree', '')} from {e.get('institution', '')}\n"
+
+        resp += "\n**Models:**\n"
+        llm = self.llm.get_status()
+        resp += f"- Local Llama: {'Running' if llm['local_available'] else 'Off'}\n"
+        resp += f"- Groq: {'Configured' if llm['groq_configured'] else 'Not configured'}\n"
+
+        resp += "\n**Email Sending:** "
+        resp += "Configured" if self.email_sender.is_configured() else "Not configured"
+
+        return resp
