@@ -111,7 +111,7 @@ Be specific about achievements and goals. Keep under 500 words."""
         final_text = pipeline_result["humanized"]
         
         return GeneratedEmail(
-            to_email=opportunity.professor_email or "",
+            to_email=getattr(opportunity, "professor_email", None) or "",
             subject=f"Application for {opportunity.title}",
             body=final_text,
             humanization_result=HumanizationResult(
