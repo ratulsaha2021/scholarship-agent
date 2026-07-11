@@ -21,6 +21,10 @@ build/
 .DS_Store
 Thumbs.db
 
+# Config (contains secrets)
+config/llm_config.json
+config/email_config.json
+
 # Resources (user data)
 resources/cv.pdf
 resources/cv.docx
