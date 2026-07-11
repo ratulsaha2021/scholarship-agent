@@ -89,7 +89,7 @@ Reference 1-2 specific papers if possible. Keep under 300 words."""
 
 Title: {opportunity.title}
 Institution: {opportunity.institution}
-Description: {opportunity.description}
+Content: {opportunity.content}
 {f'Deadline: {opportunity.deadline}' if opportunity.deadline else ''}
 
 My background:
