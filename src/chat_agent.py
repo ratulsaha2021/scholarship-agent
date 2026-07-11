@@ -200,6 +200,7 @@ class ChatAgent:
 
     def _handle_send_response(self, message):
         ml = message.lower()
+
         if any(w in ml for w in ["yes", "send", "go", "sure"]):
             if self.pending_email and self.email_sender.is_configured():
                 result = self.email_sender.send_email(
@@ -216,10 +217,60 @@ class ChatAgent:
                 return f"**Failed:** {result['error']}\n\nCopy the email above and send manually."
             self.flow_state = "idle"
             return "Email not configured. Copy the email above and send it manually."
-        if any(w in ml for w in ["no", "cancel", "edit"]):
+
+        if any(w in ml for w in ["no", "cancel"]):
             self.flow_state = "idle"
-            return "Okay. What would you like to change?"
-        return "Type **'send'** to send, **'edit'** to modify, or **'cancel'**."
+            return "Cancelled. Paste a new post anytime."
+
+        if any(w in ml for w in ["edit", "change", "modify"]):
+            self.flow_state = "idle"
+            return "What would you like me to change? Tell me specifically (e.g., 'make it shorter', 'add my publication about X')."
+
+        if any(w in ml for w in ["about me", "my info", "my profile", "who am i", "tell me about"]):
+            return self._show_status()
+
+        if any(w in ml for w in ["what did you write", "show email", "what's in it", "summary"]):
+            if self.pending_email:
+                return (f"**To:** {self.pending_email.to_email}\n"
+                        f"**Subject:** {self.pending_email.subject}\n\n"
+                        "Type **'send'** to send, **'edit'** to modify.")
+            return "No email ready."
+
+        if any(w in ml for w in ["help", "what can"]):
+            return ("**Options:**\n"
+                    "- `send` — send the email\n"
+                    "- `edit` — tell me what to change\n"
+                    "- `cancel` — discard\n"
+                    "- Ask me anything about the email")
+
+        # Default: treat as modification request
+        if self.pending_email:
+            return self._handle_email_edit(message)
+
+        self.flow_state = "idle"
+        return "What would you like to do?"
+
+    def _handle_email_edit(self, instruction):
+        """Modify the pending email based on user instruction."""
+        if not self.pending_email:
+            return "No email to edit."
+
+        prompt = f"""Edit this email based on the instruction:
+
+Current email:
+{self.pending_email.body}
+
+Instruction: {instruction}
+
+Return the edited email. Keep it concise and professional."""
+
+        try:
+            edited = self.llm.generate(prompt, use_groq=True)
+            self.pending_email.body = edited
+            return (f"**Updated email:**\n\n{edited}\n\n---\n\n"
+                    "Type **'send'** to send, **'edit'** to change more.")
+        except Exception:
+            return "Couldn't edit. Please rephrase your request."
 
     def _handle_clarification_response(self, message):
         self.context["clarification"] = message
