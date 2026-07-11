@@ -78,18 +78,21 @@ Reference 1-2 specific papers if possible. Keep under 300 words."""
     
     def write_scholarship_application(
         self,
-        opportunity: Opportunity,
+        opportunity,
         additional_info: Optional[str] = None
     ) -> GeneratedEmail:
         """Write a scholarship application using hybrid LLM."""
         
         context = self.resources.to_context_string()
         
+        # Support both Opportunity (has description) and ApplicationPost (has content)
+        desc = getattr(opportunity, "content", None) or getattr(opportunity, "description", "")
+        
         prompt = f"""Write a scholarship application for:
 
 Title: {opportunity.title}
 Institution: {opportunity.institution}
-Content: {opportunity.content}
+Description: {desc}
 {f'Deadline: {opportunity.deadline}' if opportunity.deadline else ''}
 
 My background:
