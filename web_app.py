@@ -70,16 +70,18 @@ def setup_page():
         
         st.subheader("Research Interests")
         interests_text = st.text_area(
-            "One per line",
+            "Research interests (one per line)",
             value="\n".join(resources.research_interests),
-            height=100
+            height=100,
+            key="interests_text"
         )
         
         st.subheader("Skills")
         skills_text = st.text_area(
-            "One per line",
+            "Skills (one per line)",
             value="\n".join(resources.skills),
-            height=100
+            height=100,
+            key="skills_text"
         )
     
     with col2:
@@ -95,7 +97,8 @@ def setup_page():
         notes = st.text_area(
             "Any extra info you want included",
             value=resources.additional_notes,
-            height=150
+            height=150,
+            key="additional_notes"
         )
         
         st.subheader("Education")
@@ -234,7 +237,8 @@ def write_email_page():
         st.subheader("Your Message")
         custom_message = st.text_area(
             "Anything specific you want to mention",
-            placeholder="e.g., I read your paper on X and found Y particularly interesting..."
+            placeholder="e.g., I read your paper on X and found Y particularly interesting...",
+            key="custom_message"
         )
     
     with col2:
@@ -295,7 +299,7 @@ def apply_page():
         if selected.description:
             st.write(f"**Description:** {selected.description}")
         
-        additional = st.text_area("Additional information to include")
+        additional = st.text_area("Additional information to include", key="additional_info")
         
         if st.button("Generate Application", type="primary"):
             with st.spinner("Generating application..."):
@@ -311,9 +315,9 @@ def display_generated_email(email: GeneratedEmail):
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.text_input("Subject", value=email.subject, disabled=True)
-        st.text_input("To", value=email.to_email, disabled=True)
-        st.text_area("Email Body", value=email.body, height=400, disabled=True)
+        st.text_input("Subject", value=email.subject, disabled=True, key=f"subject_{email.to_email}")
+        st.text_input("To", value=email.to_email, disabled=True, key=f"to_{email.to_email}")
+        st.text_area("Email Body", value=email.body, height=400, disabled=True, key=f"body_{email.to_email}")
     
     with col2:
         st.subheader("Review")
