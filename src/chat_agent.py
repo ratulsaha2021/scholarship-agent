@@ -126,6 +126,7 @@ class ChatAgent:
             "deadline": post.deadline,
             "requirements": post.requirements,
             "type": post.post_type,
+            "metadata": post.metadata or {},
         }
 
         has_cv = bool(self.resources.name and self.resources.email)
@@ -135,6 +136,14 @@ class ChatAgent:
             resp += f"**Institution:** {post.institution}\n"
         if post.deadline:
             resp += f"**Deadline:** {post.deadline}\n"
+        
+        prof_email = (post.metadata or {}).get("professor_email", "")
+        if prof_email:
+            resp += f"**Email:** {prof_email}\n"
+        
+        subject_fmt = (post.metadata or {}).get("subject_format", "")
+        if subject_fmt:
+            resp += f"**Subject format:** {subject_fmt}\n"
         resp += "\n"
 
         needs = self._analyze_requirements(post.content)
@@ -293,6 +302,7 @@ class ChatAgent:
             post_type=self.current_post["type"],
             deadline=self.current_post["deadline"],
             requirements=self.current_post["requirements"],
+            metadata=self.current_post.get("metadata", {}),
         )
 
         generated = self.writer.write_scholarship_application(post_obj, clarification or None)

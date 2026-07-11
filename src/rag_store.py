@@ -246,6 +246,14 @@ class PostProcessor:
         if req_match:
             requirements = req_match.group(1).strip()[:500]
         
+        # Extract email from post
+        email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
+        professor_email = email_match.group(0) if email_match else ""
+        
+        # Extract subject format if specified
+        subject_match = re.search(r'(?:subject|email subject)[:\s]*(.*?)(?:\n|$)', text, re.IGNORECASE)
+        subject_format = subject_match.group(1).strip() if subject_match else ""
+        
         return ApplicationPost(
             id="",
             title=title,
@@ -253,7 +261,8 @@ class PostProcessor:
             content=text[:2000],
             post_type=post_type,
             deadline=deadline,
-            requirements=requirements
+            requirements=requirements,
+            metadata={"professor_email": professor_email, "subject_format": subject_format}
         )
     
     def process_image_text(self, ocr_text: str, post_type: str = "scholarship") -> ApplicationPost:

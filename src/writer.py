@@ -88,11 +88,11 @@ Reference 1-2 specific papers if possible. Keep under 300 words."""
         # Support both Opportunity (has description) and ApplicationPost (has content)
         desc = getattr(opportunity, "content", None) or getattr(opportunity, "description", "")
         
-        prompt = f"""Write a scholarship application for:
+        prompt = f"""Write a PhD/scholarship application email for:
 
 Title: {opportunity.title}
 Institution: {opportunity.institution}
-Description: {desc}
+Post details: {desc}
 {f'Deadline: {opportunity.deadline}' if opportunity.deadline else ''}
 
 My background:
@@ -100,8 +100,17 @@ My background:
 
 {f'Additional info: {additional_info}' if additional_info else ''}
 
-Write a compelling, human-sounding application. Show genuine passion.
-Be specific about achievements and goals. Keep under 500 words."""
+Rules for the email:
+1. Keep it SHORT - max 250 words
+2. Start directly with purpose, no "I am writing to express..."
+3. Mention 1-2 SPECIFIC research topics from the post that match my experience
+4. Reference specific skills/projects from my profile that are relevant
+5. End with what I've attached (CV, transcript, research note)
+6. Use contractions (I'm, don't, can't)
+7. Sound like a real person, not a template
+8. Do NOT repeat phrases or ideas
+9. Match the exact subject format if specified in the post
+10. Be professional but concise - professors are busy"""
         
         # Run hybrid pipeline
         pipeline_result = self.llm.hybrid_generate(prompt, context)
@@ -110,9 +119,20 @@ Be specific about achievements and goals. Keep under 500 words."""
         ai_analysis = pipeline_result["ai_analysis"]
         final_text = pipeline_result["humanized"]
         
+        # Extract email from metadata if available
+        meta = getattr(opportunity, "metadata", None) or {}
+        prof_email = meta.get("professor_email", "") or getattr(opportunity, "professor_email", "") or ""
+        subject_format = meta.get("subject_format", "")
+        
+        # Use subject format from post if specified, otherwise default
+        if subject_format:
+            subject = subject_format.replace("Your Name", self.resources.name or "Applicant")
+        else:
+            subject = f"Application for {opportunity.title}"
+        
         return GeneratedEmail(
-            to_email=getattr(opportunity, "professor_email", None) or "",
-            subject=f"Application for {opportunity.title}",
+            to_email=prof_email,
+            subject=subject,
             body=final_text,
             humanization_result=HumanizationResult(
                 original=raw_email,
