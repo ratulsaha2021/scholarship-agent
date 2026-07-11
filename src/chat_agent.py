@@ -537,6 +537,23 @@ Return the edited email. Keep it concise and professional."""
 
     def _handle_post_question(self, message):
         """Handle questions when a post is loaded."""
+        ml = message.lower()
+
+        # If asking about own projects/profile, show from profile
+        if any(w in ml for w in ["my", "mine", "i have", "i did", "i worked", "contribution", "project"]):
+            profile = self.resources.to_context_string()
+            prompt = f"""The user asks: {message}
+
+Their profile:
+{profile}
+
+Give a brief answer based on their actual profile. Be specific about what they have."""
+
+            try:
+                return self.llm.generate(prompt, use_groq=True)
+            except Exception:
+                return self._show_detailed_profile(message)
+
         if not self.current_post:
             return "No post loaded. Paste one first."
 
@@ -546,9 +563,9 @@ Institution: {self.current_post['institution']}
 
 User asks: {message}
 
-Give a brief, helpful answer. If it's about the user's fit for the position, reference their profile."""
+Give a brief, helpful answer."""
 
         try:
             return self.llm.generate(prompt, use_groq=True)
         except Exception:
-            return "I can help with that. Try 'write' to generate the email, or ask something specific."
+            return "Try 'write' to generate the email, or ask something specific."

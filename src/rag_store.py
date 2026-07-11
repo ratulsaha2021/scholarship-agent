@@ -251,7 +251,7 @@ class PostProcessor:
         professor_email = email_match.group(0) if email_match else ""
         
         # Extract subject format if specified
-        subject_match = re.search(r'(?:subject|email subject)[:\s]*(.*?)(?:\n|$)', text, re.IGNORECASE)
+        subject_match = re.search(r'(?:subject|email subject)[:\s]*(?:\n\s*)?(.*?)(?:\n\n|\n[A-Z]|\Z)', text, re.DOTALL | re.IGNORECASE)
         subject_format = subject_match.group(1).strip() if subject_match else ""
         
         return ApplicationPost(
