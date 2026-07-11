@@ -100,17 +100,17 @@ My background:
 
 {f'Additional info: {additional_info}' if additional_info else ''}
 
-Rules for the email:
-1. Keep it SHORT - max 250 words
-2. Start directly with purpose, no "I am writing to express..."
-3. Mention 1-2 SPECIFIC research topics from the post that match my experience
-4. Reference specific skills/projects from my profile that are relevant
-5. End with what I've attached (CV, transcript, research note)
-6. Use contractions (I'm, don't, can't)
-7. Sound like a real person, not a template
-8. Do NOT repeat phrases or ideas
-9. Match the exact subject format if specified in the post
-10. Be professional but concise - professors are busy"""
+STRICT RULES:
+1. MAX 200 words. Count carefully. Do NOT exceed.
+2. Do NOT repeat any phrase or idea. Every sentence must say something NEW.
+3. Start with "Dear Dr. [Last Name]," or "Dear Professor [Last Name],"
+4. First sentence: state the specific position and one reason you're interested
+5. Second paragraph: ONE specific project/skill that matches their research
+6. Final sentence: "I have attached my CV, transcript, and research statement."
+7. Sign off with "Best regards," then name
+8. Do NOT use: "I am writing to express", "I believe", "I think", "Furthermore", "Moreover"
+9. Use contractions (I'm, don't, can't)
+10. Do NOT mention "interdisciplinary" or "collaboration" unless the post specifically asks for it"""
         
         # Run hybrid pipeline
         pipeline_result = self.llm.hybrid_generate(prompt, context)

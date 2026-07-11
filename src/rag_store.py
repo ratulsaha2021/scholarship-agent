@@ -250,9 +250,20 @@ class PostProcessor:
         email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
         professor_email = email_match.group(0) if email_match else ""
         
-        # Extract subject format if specified
-        subject_match = re.search(r'(?:subject|email subject)[:\s]*(?:\n\s*)?(.*?)(?:\n\n|\n[A-Z]|\Z)', text, re.DOTALL | re.IGNORECASE)
-        subject_format = subject_match.group(1).strip() if subject_match else ""
+        # Extract subject format - try multiple patterns
+        subject_format = ""
+        # Pattern 1: "Email subject:" followed by content
+        subject_match = re.search(r'(?i)email\s+subject[:\s]*\n?\s*(.+?)(?:\n\n|\n(?=[A-Z\[])|\Z)', text, re.DOTALL)
+        if subject_match:
+            subject_format = subject_match.group(1).strip()
+        # Pattern 2: "Subject:" line
+        if not subject_format:
+            subject_match = re.search(r'(?i)subject[:\s]+(.+?)(?:\n|$)', text)
+            if subject_match:
+                subject_format = subject_match.group(1).strip()
+        
+        # Clean up unicode characters
+        subject_format = re.sub(r'[^\x00-\x7F]+', ' ', subject_format).strip()
         
         return ApplicationPost(
             id="",
