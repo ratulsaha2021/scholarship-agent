@@ -1,4 +1,4 @@
-"""Chat agent - main conversational interface."""
+"""Chat agent - main conversational interface with hybrid LLM."""
 
 import json
 import re
@@ -16,17 +16,19 @@ from .rag_store import RAGStore, ApplicationPost, PostProcessor
 from .ocr_processor import OCRProcessor
 from .email_sender import EmailSender, EmailConfig
 from .intent_detector import IntentDetector, Intent, DetectedIntent
+from .hybrid_llm import HybridLLM, LLMConfig
 
 RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 
 class ChatAgent:
-    """Conversational agent that handles all tasks via chat."""
+    """Conversational agent with hybrid LLM routing."""
     
     def __init__(self):
         self.config = AgentConfig.load()
         self.resources = UserResources.load(RESOURCES_DIR)
         self.humanizer = Humanizer(level="high")
-        self.writer = EmailWriter(self.resources, self.humanizer)
+        self.llm = HybridLLM()
+        self.writer = EmailWriter(self.resources, self.humanizer, self.llm)
         self.cv_extractor = CVExtractor()
         self.rag_store = RAGStore()
         self.post_processor = PostProcessor()
@@ -60,16 +62,16 @@ class ChatAgent:
         return response
     
     def handle_file_upload(self, filename: str, file_bytes: bytes, file_type: str) -> str:
-        """Handle file uploads (CV, images, etc.)."""
+        """Handle file uploads."""
         if file_type in ["pdf", "docx", "txt"]:
             return self._handle_cv_upload(filename, file_bytes, file_type)
         elif file_type in ["png", "jpg", "jpeg"]:
             return self._handle_image_upload(filename, file_bytes)
         else:
-            return f"Unsupported file type: {file_type}. Please upload PDF, DOCX, TXT, PNG, JPG, or JPEG."
+            return f"Unsupported file type: {file_type}"
     
     def _handle_intent(self, intent: DetectedIntent, text: str) -> str:
-        """Route to appropriate handler based on intent."""
+        """Route to appropriate handler."""
         handlers = {
             Intent.CV_UPLOAD: lambda: self._handle_cv_request(text),
             Intent.CV_EXTRACT: lambda: self._handle_cv_extract(),
@@ -93,11 +95,8 @@ class ChatAgent:
     def _handle_cv_request(self, text: str) -> str:
         """Handle CV upload request."""
         return ("Please upload your CV using the file uploader below.\n\n"
-                "Supported formats:\n"
-                "- PDF (.pdf)\n"
-                "- Word (.docx)\n"
-                "- Text (.txt)\n\n"
-                "I'll automatically extract all your information from it.")
+                "Supported formats: PDF, DOCX, TXT\n\n"
+                "I'll automatically extract all your information.")
     
     def _handle_cv_upload(self, filename: str, file_bytes: bytes, file_type: str) -> str:
         """Process uploaded CV file."""
@@ -212,7 +211,7 @@ class ChatAgent:
         return response
     
     def _handle_write_email(self, entities: Dict, text: str) -> str:
-        """Handle email writing request."""
+        """Handle email writing request using hybrid LLM."""
         prof_name = entities.get('professor_name', '')
         prof_email = entities.get('email', '')
         
@@ -232,20 +231,30 @@ class ChatAgent:
         if topic_match:
             research_topic = topic_match.group(1).strip()
         
-        with self.writer as w:
-            generated = self.writer.write_professor_email(
-                prof_name, prof_email, research_topic or "research opportunities"
-            )
+        # Generate email with hybrid LLM
+        generated = self.writer.write_professor_email(
+            prof_name, prof_email, research_topic or "research opportunities"
+        )
         
         self.pending_email = generated
         
+        # Get AI analysis
+        ai_score = generated.ai_analysis.get("ai_score", "N/A") if generated.ai_analysis else "N/A"
+        
         response = f"**Email drafted for Professor {prof_name}**\n\n"
         response += f"**To:** {generated.to_email}\n"
-        response += f"**Subject:** {generated.subject}\n\n"
+        response += f"**Subject:** {generated.subject}\n"
+        response += f"**AI Detection Score:** {ai_score}/100\n\n"
         response += "---\n\n"
         response += generated.body
         response += "\n\n---\n\n"
-        response += "**Humanization Score:** " + f"{generated.humanization_result.confidence_score:.2f}\n\n"
+        
+        # Show model status
+        llm_status = self.llm.get_status()
+        if llm_status['local_available']:
+            response += "*Drafted with local Qwen 2.5 + humanized with Groq*\n\n"
+        elif llm_status['groq_configured']:
+            response += "*Generated with Groq API*\n\n"
         
         if self.email_sender.is_configured():
             response += "Type 'send' to send this email, or 'edit' to modify it."
@@ -342,35 +351,48 @@ class ChatAgent:
                 "Please provide:\n"
                 "1. Your email address\n"
                 "2. Your password or app-specific password\n\n"
-                "**Note for Gmail:** You need to use an App Password, not your regular password.\n"
+                "**Note for Gmail:** You need to use an App Password.\n"
                 "Generate one at: https://myaccount.google.com/apppasswords\n\n"
                 "Type: 'email: your@email.com password: yourpassword'")
     
     def _handle_show_saved(self) -> str:
         """Show saved emails."""
-        # This would need persistent storage - for now show from session
         return ("**Saved Emails:**\n\n"
                 "Emails are saved in the `resources/saved_responses/` folder.\n\n"
-                "To view them, check the folder directly or use the 'Saved Emails' tab in the UI.")
+                "To view them, check the folder directly.")
     
     def _handle_help(self) -> str:
-        """Show help message."""
-        return ("**Here's what I can do:**\n\n"
-                "**📄 CV Management:**\n"
-                "- Upload CV → 'upload cv' or just upload a file\n"
-                "- Extract info → 'extract from cv'\n\n"
-                "**📝 Posts & Opportunities:**\n"
-                "- Add post → 'add scholarship' or paste text\n"
-                "- Add from image → upload image\n"
-                "- Search posts → 'search posts about machine learning'\n\n"
-                "**✉️ Email:**\n"
-                "- Write email → 'write email to Dr. Smith at smith@mit.edu'\n"
-                "- Apply to scholarship → 'apply to scholarship' or 'apply for PhD'\n"
-                "- Send email → 'send' (after writing)\n\n"
-                "**⚙️ Settings:**\n"
-                "- Setup email → 'setup email gmail'\n"
-                "- Update profile → 'update my name to John'\n\n"
-                "**Just tell me what you want to do in plain language!**")
+        """Show help message with model status."""
+        llm_status = self.llm.get_status()
+        
+        response = "**Here's what I can do:**\n\n"
+        
+        response += "**🤖 Model Status:**\n"
+        response += f"- Local Qwen 2.5: {'✅ Running' if llm_status['local_available'] else '❌ Not running'}\n"
+        response += f"- Groq API: {'✅ Configured' if llm_status['groq_configured'] else '❌ Not configured'}\n\n"
+        
+        response += "**📄 CV Management:**\n"
+        response += "- Upload CV → 'upload cv' or just upload a file\n"
+        response += "- Extract info → 'extract from cv'\n\n"
+        
+        response += "**📝 Posts & Opportunities:**\n"
+        response += "- Add post → 'add scholarship' or paste text\n"
+        response += "- Add from image → upload image\n"
+        response += "- Search posts → 'search posts about machine learning'\n\n"
+        
+        response += "**✉️ Email:**\n"
+        response += "- Write email → 'write email to Dr. Smith at smith@mit.edu'\n"
+        response += "- Apply → 'apply to scholarship' or 'apply for PhD'\n"
+        response += "- Send email → 'send' (after writing)\n\n"
+        
+        response += "**⚙️ Settings:**\n"
+        response += "- Setup email → 'setup email gmail'\n"
+        response += "- Setup Groq → 'setup groq [api_key]'\n"
+        response += "- Update profile → 'update my name to John'\n\n"
+        
+        response += "**Just tell me what you want to do in plain language!**"
+        
+        return response
     
     def _handle_profile_update(self, text: str) -> str:
         """Handle profile updates."""
@@ -386,17 +408,36 @@ class ChatAgent:
             self._save_resources()
             return f"Email updated to: {self.resources.email}"
         
+        groq_match = re.search(r'setup\s+groq\s+(\S+)', text)
+        if groq_match:
+            api_key = groq_match.group(1)
+            self.llm.config.groq_api_key = api_key
+            self.llm.config.save()
+            return "Groq API configured! You can now use Groq for humanization."
+        
         return ("What would you like to update?\n\n"
                 "- 'update my name to [name]'\n"
-                "- 'update my email to [email]'")
+                "- 'update my email to [email]'\n"
+                "- 'setup groq [api_key]'")
     
     def _handle_general(self, text: str) -> str:
         """Handle general conversation."""
         text_lower = text.lower()
         
         if any(word in text_lower for word in ['hello', 'hi', 'hey', 'greetings']):
+            llm_status = self.llm.get_status()
+            models = []
+            if llm_status['local_available']:
+                models.append("Local Qwen 2.5")
+            if llm_status['groq_configured']:
+                models.append("Groq API")
+            
+            model_str = ", ".join(models) if models else "No LLM configured"
+            
             return (f"Hello{(' ' + self.resources.name) if self.resources.name else ''}! 👋\n\n"
-                    "I'm your Scholarship Application Agent. I can help you:\n"
+                    "I'm your Scholarship Application Agent.\n\n"
+                    f"**Active Models:** {model_str}\n\n"
+                    "I can help you:\n"
                     "- Upload and parse your CV\n"
                     "- Save scholarship/position announcements\n"
                     "- Write humanized emails to professors\n"
@@ -417,7 +458,7 @@ class ChatAgent:
                 json.dump(user_data, f, indent=2)
             
             self.resources = UserResources.load(RESOURCES_DIR)
-            self.writer = EmailWriter(self.resources, self.humanizer)
+            self.writer = EmailWriter(self.resources, self.humanizer, self.llm)
             
             return "CV data saved to your profile! You can now use it for applications."
         

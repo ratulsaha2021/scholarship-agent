@@ -1,4 +1,4 @@
-"""Web UI for Scholarship Agent - Chat Interface."""
+"""Web UI for Scholarship Agent - Chat Interface with Hybrid LLM."""
 
 import streamlit as st
 import json
@@ -7,6 +7,7 @@ from datetime import datetime
 
 from src.chat_agent import ChatAgent
 from src.email_sender import EmailSender, EmailConfig
+from src.hybrid_llm import HybridLLM, LLMConfig
 
 st.set_page_config(
     page_title="Scholarship Agent",
@@ -33,6 +34,22 @@ def sidebar():
             st.session_state.messages = []
             st.session_state.agent = load_agent()
             st.rerun()
+        
+        st.markdown("---")
+        
+        # Model Status
+        st.markdown("### 🤖 Model Status")
+        llm_status = st.session_state.agent.llm.get_status()
+        
+        if llm_status['local_available']:
+            st.success(f"Local: {llm_status['local_model']}")
+        else:
+            st.warning("Local Qwen: Not running")
+        
+        if llm_status['groq_configured']:
+            st.success(f"Groq: {llm_status['groq_model']}")
+        else:
+            st.warning("Groq: Not configured")
         
         st.markdown("---")
         st.markdown("### Quick Actions")
@@ -81,6 +98,9 @@ def sidebar():
         
         if st.button("⚙️ Setup Email", use_container_width=True):
             st.session_state.show_smtp_setup = True
+        
+        if st.button("🤖 Configure LLM", use_container_width=True):
+            st.session_state.show_llm_setup = True
         
         st.markdown("---")
         st.markdown("### Stats")
@@ -219,6 +239,72 @@ def smtp_setup_modal():
                     st.session_state.show_smtp_setup = False
                     st.rerun()
 
+def llm_setup_modal():
+    if st.session_state.get("show_llm_setup", False):
+        with st.expander("🤖 Configure LLM Models", expanded=True):
+            st.info("Configure local Qwen and/or Groq API for hybrid processing.")
+            
+            tab1, tab2 = st.tabs(["Groq API", "Local Qwen"])
+            
+            with tab1:
+                st.subheader("Groq API (Free Tier)")
+                st.markdown("""
+                1. Go to [console.groq.com](https://console.groq.com)
+                2. Create a free account
+                3. Get your API key
+                4. Paste it below
+                """)
+                
+                groq_key = st.text_input(
+                    "Groq API Key",
+                    type="password",
+                    value=st.session_state.agent.llm.config.groq_api_key
+                )
+                
+                groq_model = st.selectbox(
+                    "Model",
+                    ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+                    index=0
+                )
+                
+                if st.button("Save Groq Config", type="primary", key="save_groq"):
+                    st.session_state.agent.llm.config.groq_api_key = groq_key
+                    st.session_state.agent.llm.config.groq_model = groq_model
+                    st.session_state.agent.llm.config.save()
+                    st.success("Groq configured!")
+                    st.session_state.show_llm_setup = False
+                    st.rerun()
+            
+            with tab2:
+                st.subheader("Local Qwen 2.5 7B")
+                st.markdown("""
+                1. Install Ollama: `curl -fsSL https://ollama.com/install.sh | sh`
+                2. Pull model: `ollama pull qwen2.5:7b`
+                3. Ollama runs on `localhost:11434` by default
+                """)
+                
+                local_url = st.text_input(
+                    "Ollama URL",
+                    value=st.session_state.agent.llm.config.local_base_url
+                )
+                
+                local_model = st.text_input(
+                    "Model Name",
+                    value=st.session_state.agent.llm.config.local_model
+                )
+                
+                if st.button("Save Local Config", type="primary", key="save_local"):
+                    st.session_state.agent.llm.config.local_base_url = local_url
+                    st.session_state.agent.llm.config.local_model = local_model
+                    st.session_state.agent.llm.config.save()
+                    st.success("Local config saved!")
+                    st.session_state.show_llm_setup = False
+                    st.rerun()
+            
+            if st.button("Close", key="close_llm"):
+                st.session_state.show_llm_setup = False
+                st.rerun()
+
 def main():
     st.title("🎓 Scholarship Application Agent")
     
@@ -227,6 +313,7 @@ def main():
     
     cv_upload_section()
     smtp_setup_modal()
+    llm_setup_modal()
     
     col_chat, col_upload = st.columns([3, 1])
     
