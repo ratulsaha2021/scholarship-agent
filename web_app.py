@@ -1,21 +1,12 @@
-"""Web UI for Scholarship Agent using Streamlit."""
+"""Web UI for Scholarship Agent - Chat Interface."""
 
 import streamlit as st
 import json
 from pathlib import Path
 from datetime import datetime
 
-from src.config import AgentConfig
-from src.resource_loader import UserResources, create_sample_resources
-from src.humanizer import Humanizer
-from src.discovery import OpportunityDiscovery, Opportunity, create_sample_targets
-from src.writer import EmailWriter, GeneratedEmail
-from src.cv_extractor import CVExtractor, ExtractedCV
-from src.rag_store import RAGStore, ApplicationPost, PostProcessor
-from src.ocr_processor import OCRProcessor
-
-RESOURCES_DIR = Path(__file__).parent / "resources"
-DATA_DIR = Path(__file__).parent / "data"
+from src.chat_agent import ChatAgent
+from src.email_sender import EmailSender, EmailConfig
 
 st.set_page_config(
     page_title="Scholarship Agent",
@@ -24,624 +15,251 @@ st.set_page_config(
 )
 
 @st.cache_resource
-def load_config():
-    return AgentConfig.load()
-
-@st.cache_resource
-def load_humanizer():
-    return Humanizer(level="high")
-
-@st.cache_resource
-def load_rag_store():
-    return RAGStore()
-
-@st.cache_resource
-def load_ocr():
-    return OCRProcessor()
-
-def load_resources():
-    return UserResources.load(RESOURCES_DIR)
+def load_agent():
+    return ChatAgent()
 
 def init_session_state():
-    if "generated_emails" not in st.session_state:
-        st.session_state.generated_emails = []
-    if "opportunities" not in st.session_state:
-        st.session_state.opportunities = []
-    if "resources_loaded" not in st.session_state:
-        st.session_state.resources_loaded = False
-    if "extracted_cv" not in st.session_state:
-        st.session_state.extracted_cv = None
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "agent" not in st.session_state:
+        st.session_state.agent = load_agent()
 
 def sidebar():
     with st.sidebar:
         st.title("🎓 Scholarship Agent")
         st.markdown("---")
         
-        page = st.radio(
-            "Navigation",
-            ["Setup", "CV Extract", "Add Posts", "Discover", "Write Email", "Apply to Scholarship", "Saved Emails"],
-            index=0
-        )
+        if st.button("New Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.agent = load_agent()
+            st.rerun()
         
         st.markdown("---")
-        st.markdown("### Quick Stats")
-        st.metric("Generated Emails", len(st.session_state.generated_emails))
+        st.markdown("### Quick Actions")
         
-        rag_store = load_rag_store()
-        stats = rag_store.get_stats()
-        st.metric("Saved Posts", stats["total_posts"])
+        if st.button("📄 Upload CV", use_container_width=True):
+            st.session_state.show_cv_upload = True
         
-        return page
+        if st.button("🔍 Search Posts", use_container_width=True):
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "search posts"
+            })
+            response = st.session_state.agent.chat("search posts")
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response
+            })
+            st.rerun()
+        
+        if st.button("✉️ Write Email", use_container_width=True):
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "write email"
+            })
+            response = st.session_state.agent.chat("write email")
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response
+            })
+            st.rerun()
+        
+        if st.button("❓ Help", use_container_width=True):
+            st.session_state.messages.append({
+                "role": "user",
+                "content": "help"
+            })
+            response = st.session_state.agent.chat("help")
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response
+            })
+            st.rerun()
+        
+        st.markdown("---")
+        st.markdown("### Settings")
+        
+        if st.button("⚙️ Setup Email", use_container_width=True):
+            st.session_state.show_smtp_setup = True
+        
+        st.markdown("---")
+        st.markdown("### Stats")
+        st.metric("Messages", len(st.session_state.messages))
+        
+        agent = st.session_state.agent
+        rag_stats = agent.rag_store.get_stats()
+        st.metric("Saved Posts", rag_stats["total_posts"])
 
-def setup_page():
-    st.header("⚙️ Setup Your Profile")
+def display_chat():
+    st.header("💬 Chat with Scholarship Agent")
     
-    resources = load_resources()
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Personal Information")
-        name = st.text_input("Full Name", value=resources.name)
-        email = st.text_input("Email", value=resources.email)
-        phone = st.text_input("Phone", value=resources.phone)
+    if prompt := st.chat_input("Tell me what you need..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
         
-        st.subheader("Research Interests")
-        interests_text = st.text_area(
-            "Research interests (one per line)",
-            value="\n".join(resources.research_interests),
-            height=100,
-            key="interests_text"
-        )
+        with st.chat_message("user"):
+            st.markdown(prompt)
         
-        st.subheader("Skills")
-        skills_text = st.text_area(
-            "Skills (one per line)",
-            value="\n".join(resources.skills),
-            height=100,
-            key="skills_text"
-        )
-    
-    with col2:
-        st.subheader("Additional Notes")
-        notes = st.text_area(
-            "Any extra info you want included",
-            value=resources.additional_notes,
-            height=150,
-            key="additional_notes"
-        )
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = st.session_state.agent.chat(prompt)
+            st.markdown(response)
         
-        st.subheader("Education")
-        if resources.education:
-            for i, edu in enumerate(resources.education):
-                with st.expander(f"Education {i+1}"):
-                    st.text(edu.get("degree", ""))
-        
-        if st.button("Add Education"):
-            st.session_state.show_edu_form = True
-        
-        if st.session_state.get("show_edu_form", False):
-            with st.form("edu_form"):
-                degree = st.text_input("Degree (e.g., BSc, MSc)")
-                field = st.text_input("Field of Study")
-                institution = st.text_input("Institution")
-                year = st.text_input("Year")
-                submitted = st.form_submit_button("Save")
-                
-                if submitted:
-                    edu = {"degree": degree, "field": field, "institution": institution, "year": year}
-                    resources.education.append(edu)
-                    st.session_state.show_edu_form = False
-                    st.rerun()
-    
-    if st.button("Save Profile", type="primary"):
-        user_data = {
-            "name": name,
-            "email": email,
-            "phone": phone,
-            "research_interests": [i.strip() for i in interests_text.split("\n") if i.strip()],
-            "skills": [s.strip() for s in skills_text.split("\n") if s.strip()],
-            "education": resources.education,
-            "experience": resources.experience,
-            "publications": resources.publications,
-            "awards": resources.awards,
-            "target_universities": resources.target_universities
-        }
-        
-        RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
-        with open(RESOURCES_DIR / "user_data.json", "w") as f:
-            json.dump(user_data, f, indent=2)
-        
-        if notes:
-            (RESOURCES_DIR / "additional_notes.txt").write_text(notes)
-        
-        st.success("Profile saved!")
-        st.session_state.resources_loaded = False
+        st.session_state.messages.append({"role": "assistant", "content": response})
 
-def cv_extract_page():
-    st.header("📄 CV Auto-Extract")
-    
-    st.info("Upload your CV and the agent will automatically extract all your information.")
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        cv_file = st.file_uploader("Upload CV (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"], key="cv_upload")
-        
-        if cv_file:
-            with st.spinner("Extracting information from CV..."):
-                extractor = CVExtractor()
+def cv_upload_section():
+    if st.session_state.get("show_cv_upload", False):
+        with st.expander("📄 Upload CV", expanded=True):
+            cv_file = st.file_uploader(
+                "Upload your CV",
+                type=["pdf", "docx", "txt"],
+                key="cv_upload_main"
+            )
+            
+            if cv_file:
+                file_type = cv_file.name.split(".")[-1].lower()
                 
-                temp_path = RESOURCES_DIR / f"temp_cv{Path(cv_file.name).suffix}"
-                temp_path.write_bytes(cv_file.read())
+                with st.spinner("Processing CV..."):
+                    response = st.session_state.agent.handle_file_upload(
+                        cv_file.name,
+                        cv_file.read(),
+                        file_type
+                    )
                 
-                try:
-                    extracted = extractor.extract_from_file(temp_path)
-                    st.session_state.extracted_cv = extracted
-                    st.success("CV extracted successfully!")
-                except Exception as e:
-                    st.error(f"Extraction failed: {e}")
-                finally:
-                    temp_path.unlink(missing_ok=True)
-    
-    with col2:
-        if st.session_state.extracted_cv:
-            cv = st.session_state.extracted_cv
-            
-            st.subheader("Extracted Information")
-            
-            with st.expander("Personal Info", expanded=True):
-                st.text_input("Name", value=cv.name, key="cv_name")
-                st.text_input("Email", value=cv.email, key="cv_email")
-                st.text_input("Phone", value=cv.phone, key="cv_phone")
-            
-            with st.expander("Summary"):
-                st.text_area("Summary", value=cv.summary, height=100, key="cv_summary")
-            
-            with st.expander("Education"):
-                for i, edu in enumerate(cv.education):
-                    st.write(f"**{edu.get('degree', 'N/A')}** - {edu.get('institution', 'N/A')} ({edu.get('year', 'N/A')})")
-            
-            with st.expander("Experience"):
-                for exp in cv.experience:
-                    st.write(f"**{exp.get('title', 'N/A')}** at {exp.get('organization', 'N/A')}")
-                    if exp.get('description'):
-                        st.caption(exp['description'][:150])
-            
-            with st.expander("Skills"):
-                st.write(", ".join(cv.skills))
-            
-            with st.expander("Publications"):
-                for pub in cv.publications:
-                    st.write(f"- {pub}")
-            
-            if st.button("Save to Profile", type="primary", key="save_cv"):
-                user_data = cv.to_dict()
-                user_data["research_interests"] = []
-                user_data["target_universities"] = []
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response
+                })
                 
-                RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
-                with open(RESOURCES_DIR / "user_data.json", "w") as f:
-                    json.dump(user_data, f, indent=2)
-                
-                st.success("CV data saved to profile!")
-                st.session_state.resources_loaded = False
-
-def add_posts_page():
-    st.header("📝 Add Application Posts")
-    
-    st.info("Add scholarship/position posts via text or image. The agent will store them using RAG for intelligent matching.")
-    
-    rag_store = load_rag_store()
-    ocr = load_ocr()
-    processor = PostProcessor()
-    
-    tab1, tab2, tab3 = st.tabs(["Paste Text", "Upload Image", "View Saved Posts"])
-    
-    with tab1:
-        st.subheader("Paste Post Text")
-        
-        post_text = st.text_area(
-            "Paste the scholarship/position announcement here",
-            height=200,
-            key="post_text_input"
-        )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            post_type = st.selectbox("Post Type", ["scholarship", "phd_position", "professor", "job"], key="post_type_text")
-        with col2:
-            post_title = st.text_input("Title (optional)", key="post_title_text")
-        
-        if st.button("Add Post", type="primary", key="add_text_post"):
-            if post_text:
-                post = processor.process_text(post_text, post_type)
-                if post_title:
-                    post.title = post_title
-                
-                post_id = rag_store.add_post(post)
-                st.success(f"Post added! ID: {post_id}")
+                st.session_state.show_cv_upload = False
                 st.rerun()
-            else:
-                st.warning("Please paste some text")
-    
-    with tab2:
-        st.subheader("Upload Image of Post")
-        
-        if not ocr.is_available():
-            st.warning("OCR not available. Install with: `pip install pytesseract Pillow`")
-            st.code("sudo apt-get install tesseract-ocr")
-        else:
-            image_file = st.file_uploader("Upload screenshot/photo of the post", type=["png", "jpg", "jpeg"], key="image_upload")
             
-            if image_file:
-                st.image(image_file, caption="Uploaded Image", use_column_width=True)
-                
-                post_type_img = st.selectbox("Post Type", ["scholarship", "phd_position", "professor", "job"], key="post_type_img")
-                
-                if st.button("Extract & Add Post", type="primary", key="add_image_post"):
-                    with st.spinner("Extracting text from image..."):
-                        try:
-                            ocr_text = ocr.extract_text_from_bytes(image_file.read(), image_file.name)
-                            
-                            if ocr_text:
-                                st.subheader("Extracted Text")
-                                st.text_area("OCR Result", value=ocr_text, height=150, disabled=True, key="ocr_result")
-                                
-                                post = processor.process_image_text(ocr_text, post_type_img)
-                                post_id = rag_store.add_post(post)
-                                st.success(f"Post added! ID: {post_id}")
-                            else:
-                                st.warning("No text found in image")
-                        except Exception as e:
-                            st.error(f"OCR failed: {e}")
-    
-    with tab3:
-        st.subheader("Saved Posts")
-        
-        posts = rag_store.get_all_posts()
-        
-        if not posts:
-            st.info("No posts saved yet.")
-        else:
-            st.write(f"**Total:** {len(posts)} posts")
-            
-            for post in posts:
-                meta = post.get("metadata", {})
-                with st.expander(f"{meta.get('title', 'Untitled')} - {meta.get('institution', 'Unknown')}"):
-                    st.write(f"**Type:** {meta.get('post_type', 'N/A')}")
-                    st.write(f"**Institution:** {meta.get('institution', 'N/A')}")
-                    if meta.get('deadline'):
-                        st.write(f"**Deadline:** {meta['deadline']}")
-                    st.text_area("Content", value=post.get("content", ""), height=150, disabled=True, key=f"post_{post['id']}")
-                    
-                    if st.button("Delete", key=f"delete_post_{post['id']}"):
-                        rag_store.delete_post(post["id"])
-                        st.rerun()
-
-def discover_page():
-    st.header("🔍 Discover Opportunities")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.subheader("Search")
-        query = st.text_input("Search for positions (e.g., 'machine learning PhD')")
-        
-        col_search, col_manual = st.columns(2)
-        with col_search:
-            search_online = st.checkbox("Search online", value=True)
-        with col_manual:
-            load_manual = st.checkbox("Load manual targets", value=True)
-        
-        if st.button("Search", type="primary"):
-            discovery = OpportunityDiscovery()
-            opportunities = []
-            
-            with st.spinner("Searching..."):
-                if load_manual:
-                    manual = discovery.load_manual_targets(RESOURCES_DIR / "targets.json")
-                    opportunities.extend(manual)
-                
-                if search_online and query:
-                    online = discovery.search_academic_positions(query)
-                    opportunities.extend(online)
-            
-            st.session_state.opportunities = opportunities
-            st.success(f"Found {len(opportunities)} opportunities")
-        
-        st.subheader("Or Search Saved Posts")
-        rag_store = load_rag_store()
-        
-        rag_query = st.text_input("Search your saved posts")
-        if rag_query:
-            results = rag_store.search(rag_query, n_results=5)
-            
-            if results:
-                for result in results:
-                    meta = result.get("metadata", {})
-                    with st.expander(f"{meta.get('title', 'Untitled')} (Score: {result.get('score', 0):.2f})"):
-                        st.write(f"**Type:** {meta.get('post_type', 'N/A')}")
-                        st.write(f"**Institution:** {meta.get('institution', 'N/A')}")
-                        st.text_area("Content", value=result.get("content", ""), height=150, disabled=True, key=f"rag_{meta.get('title', '')}")
-    
-    with col2:
-        st.subheader("Add Manual Target")
-        with st.form("manual_target"):
-            title = st.text_input("Title")
-            inst = st.text_input("Institution")
-            opp_type = st.selectbox("Type", ["professor", "scholarship", "phd_position"])
-            url = st.text_input("URL")
-            email = st.text_input("Email (for professors)")
-            deadline = st.text_input("Deadline")
-            
-            if st.form_submit_button("Add"):
-                opp = Opportunity(
-                    type=opp_type,
-                    title=title,
-                    institution=inst,
-                    url=url,
-                    professor_email=email,
-                    deadline=deadline
-                )
-                st.session_state.opportunities.append(opp)
+            if st.button("Cancel", key="cancel_cv"):
+                st.session_state.show_cv_upload = False
                 st.rerun()
-    
-    if st.session_state.opportunities:
-        st.subheader("Discovered Opportunities")
-        
-        for i, opp in enumerate(st.session_state.opportunities):
-            with st.expander(f"{opp.type.upper()}: {opp.title} - {opp.institution}"):
-                st.write(f"**Type:** {opp.type}")
-                st.write(f"**Institution:** {opp.institution}")
-                st.write(f"**URL:** {opp.url}")
-                if opp.deadline:
-                    st.write(f"**Deadline:** {opp.deadline}")
-                if opp.professor_email:
-                    st.write(f"**Email:** {opp.professor_email}")
-                if opp.description:
-                    st.write(f"**Description:** {opp.description}")
-                
-                if st.button("Select for Application", key=f"select_{i}"):
-                    st.session_state.selected_opportunity = opp
-                    st.rerun()
 
-def write_email_page():
-    st.header("✍️ Write Professor Email")
+def image_upload_section():
+    uploaded_file = st.file_uploader(
+        "📷 Upload Image of Post",
+        type=["png", "jpg", "jpeg"],
+        key="image_upload_chat"
+    )
     
-    resources = load_resources()
-    humanizer = load_humanizer()
-    writer = EmailWriter(resources, humanizer)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        prof_name = st.text_input("Professor Name")
-        prof_email = st.text_input("Professor Email")
-        research_topic = st.text_input("Their Research Topic")
+    if uploaded_file:
+        st.image(uploaded_file, caption="Uploaded Image", width=300)
         
-        st.subheader("Your Message")
-        custom_message = st.text_area(
-            "Anything specific you want to mention",
-            placeholder="e.g., I read your paper on X and found Y particularly interesting...",
-            key="custom_message"
-        )
-    
-    with col2:
-        st.subheader("Tips")
-        st.info("""
-        - Be specific about their work
-        - Mention 1-2 specific papers
-        - Connect their work to your interests
-        - Keep it concise (200-300 words)
-        - End with a clear ask
-        """)
-        
-        st.subheader("Humanization Settings")
-        level = st.select_slider("Humanization Level", options=["low", "medium", "high"], value="high")
-        humanizer.level = level
-    
-    if st.button("Generate Email", type="primary"):
-        if not prof_name or not prof_email:
-            st.error("Please enter professor name and email")
-            return
-        
-        with st.spinner("Generating humanized email..."):
-            generated = writer.write_professor_email(
-                prof_name, prof_email, research_topic, custom_message or None
+        with st.spinner("Extracting text from image..."):
+            response = st.session_state.agent.handle_file_upload(
+                uploaded_file.name,
+                uploaded_file.read(),
+                uploaded_file.name.split(".")[-1].lower()
             )
         
-        st.session_state.generated_emails.append(generated)
-        
-        display_generated_email(generated)
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": response
+        })
+        st.rerun()
 
-def apply_page():
-    st.header("📝 Apply to Scholarship")
-    
-    resources = load_resources()
-    humanizer = load_humanizer()
-    writer = EmailWriter(resources, humanizer)
-    rag_store = load_rag_store()
-    
-    tab1, tab2 = st.tabs(["From Discovered", "From Saved Posts"])
-    
-    with tab1:
-        if not st.session_state.opportunities:
-            st.info("No opportunities loaded. Go to Discover page first.")
-        else:
-            scholarships = [o for o in st.session_state.opportunities if o.type in ["scholarship", "phd_position"]]
+def smtp_setup_modal():
+    if st.session_state.get("show_smtp_setup", False):
+        with st.expander("⚙️ Setup Email (SMTP)", expanded=True):
+            st.info("Configure email sending. For Gmail, use an App Password.")
             
-            if not scholarships:
-                st.info("No scholarships found in discovered opportunities.")
-            else:
-                selected = st.selectbox(
-                    "Select Scholarship",
-                    options=scholarships,
-                    format_func=lambda x: f"{x.title} - {x.institution}",
-                    key="select_scholarship"
-                )
-                
-                if selected:
-                    st.subheader(selected.title)
-                    st.write(f"**Institution:** {selected.institution}")
-                    st.write(f"**Deadline:** {selected.deadline or 'N/A'}")
-                    if selected.description:
-                        st.write(f"**Description:** {selected.description}")
-                    
-                    additional = st.text_area("Additional information to include", key="additional_info_1")
-                    
-                    if st.button("Generate Application", type="primary", key="gen_app_1"):
-                        with st.spinner("Generating application..."):
-                            generated = writer.write_scholarship_application(selected, additional or None)
-                        
-                        st.session_state.generated_emails.append(generated)
-                        display_generated_email(generated)
-    
-    with tab2:
-        posts = rag_store.get_all_posts()
-        
-        if not posts:
-            st.info("No saved posts. Go to Add Posts page first.")
-        else:
-            post_options = [p for p in posts if p.get("metadata", {}).get("post_type") in ["scholarship", "phd_position"]]
-            
-            if not post_options:
-                st.info("No scholarship posts saved.")
-            else:
-                selected_post = st.selectbox(
-                    "Select Saved Post",
-                    options=post_options,
-                    format_func=lambda x: f"{x.get('metadata', {}).get('title', 'Untitled')} - {x.get('metadata', {}).get('institution', 'Unknown')}",
-                    key="select_saved_post"
-                )
-                
-                if selected_post:
-                    meta = selected_post.get("metadata", {})
-                    st.subheader(meta.get("title", "Untitled"))
-                    st.write(f"**Institution:** {meta.get('institution', 'N/A')}")
-                    if meta.get('deadline'):
-                        st.write(f"**Deadline:** {meta['deadline']}")
-                    st.text_area("Content", value=selected_post.get("content", ""), height=150, disabled=True, key="selected_post_content")
-                    
-                    additional = st.text_area("Additional information to include", key="additional_info_2")
-                    
-                    if st.button("Generate Application", type="primary", key="gen_app_2"):
-                        post_obj = ApplicationPost(
-                            id=selected_post["id"],
-                            title=meta.get("title", ""),
-                            institution=meta.get("institution", ""),
-                            content=selected_post.get("content", ""),
-                            post_type=meta.get("post_type", "scholarship"),
-                            deadline=meta.get("deadline", ""),
-                            requirements=meta.get("requirements", "")
-                        )
-                        
-                        with st.spinner("Generating application..."):
-                            generated = writer.write_scholarship_application(post_obj, additional or None)
-                        
-                        st.session_state.generated_emails.append(generated)
-                        display_generated_email(generated)
-
-def display_generated_email(email: GeneratedEmail):
-    st.markdown("---")
-    st.subheader("Generated Email")
-    
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        st.text_input("Subject", value=email.subject, disabled=True, key=f"subject_{email.to_email}")
-        st.text_input("To", value=email.to_email, disabled=True, key=f"to_{email.to_email}")
-        st.text_area("Email Body", value=email.body, height=400, disabled=True, key=f"body_{email.to_email}")
-    
-    with col2:
-        st.subheader("Review")
-        review = EmailWriter(load_resources(), load_humanizer()).review_email(email)
-        
-        st.metric("Word Count", review["word_count"])
-        st.metric("Humanization Score", f"{review['humanization_score']:.2f}")
-        st.metric("AI Patterns Found", review["ai_patterns_found"])
-        
-        if review["changes_made"]:
-            st.write("**Changes Made:**")
-            for change in review["changes_made"]:
-                st.write(f"- {change}")
-        
-        st.download_button(
-            "Download Email",
-            data=email.body,
-            file_name=f"email_{email.to_email.split('@')[0]}.txt",
-            mime="text/plain"
-        )
-
-def saved_page():
-    st.header("💾 Saved Emails")
-    
-    if not st.session_state.generated_emails:
-        st.info("No emails generated yet.")
-        return
-    
-    st.write(f"**Total:** {len(st.session_state.generated_emails)} emails")
-    
-    for i, email in enumerate(st.session_state.generated_emails):
-        with st.expander(f"Email to {email.to_email}"):
-            st.write(f"**Subject:** {email.subject}")
-            st.write(f"**Humanization:** {email.humanization_result.confidence_score:.2f}")
-            st.text_area(
-                "Body",
-                value=email.body,
-                height=200,
-                key=f"email_{i}",
-                disabled=True
+            provider = st.selectbox(
+                "Email Provider",
+                ["Gmail", "Outlook", "Yahoo", "Other"]
             )
+            
+            if provider == "Gmail":
+                server = "smtp.gmail.com"
+                port = 587
+            elif provider == "Outlook":
+                server = "smtp-mail.outlook.com"
+                port = 587
+            elif provider == "Yahoo":
+                server = "smtp.mail.yahoo.com"
+                port = 587
+            else:
+                server = st.text_input("SMTP Server")
+                port = st.number_input("SMTP Port", value=587)
+            
+            email = st.text_input("Email Address")
+            password = st.text_input("Password or App Password", type="password")
             
             col1, col2 = st.columns(2)
             with col1:
-                st.download_button(
-                    "Download",
-                    data=email.body,
-                    file_name=f"email_{i+1}.txt",
-                    key=f"download_{i}"
-                )
+                if st.button("Save & Test", type="primary"):
+                    if email and password:
+                        config = EmailConfig(
+                            smtp_server=server,
+                            smtp_port=port,
+                            email_address=email,
+                            password=password
+                        )
+                        config.save()
+                        
+                        sender = EmailSender(config)
+                        result = sender.test_connection()
+                        
+                        if result['success']:
+                            st.success("Email configured successfully!")
+                            st.session_state.show_smtp_setup = False
+                            st.rerun()
+                        else:
+                            st.error(f"Connection failed: {result['error']}")
+                    else:
+                        st.warning("Please fill in all fields")
+            
             with col2:
-                if st.button("Delete", key=f"delete_{i}"):
-                    st.session_state.generated_emails.pop(i)
+                if st.button("Cancel"):
+                    st.session_state.show_smtp_setup = False
                     st.rerun()
-    
-    if st.button("Export All", type="primary"):
-        export = []
-        for email in st.session_state.generated_emails:
-            export.append({
-                "to": email.to_email,
-                "subject": email.subject,
-                "body": email.body,
-                "humanization_score": email.humanization_result.confidence_score
-            })
-        
-        st.download_button(
-            "Download All Emails (JSON)",
-            data=json.dumps(export, indent=2),
-            file_name="all_emails.json",
-            mime="application/json"
-        )
 
 def main():
-    init_session_state()
-    page = sidebar()
+    st.title("🎓 Scholarship Application Agent")
     
-    if page == "Setup":
-        setup_page()
-    elif page == "CV Extract":
-        cv_extract_page()
-    elif page == "Add Posts":
-        add_posts_page()
-    elif page == "Discover":
-        discover_page()
-    elif page == "Write Email":
-        write_email_page()
-    elif page == "Apply to Scholarship":
-        apply_page()
-    elif page == "Saved Emails":
-        saved_page()
+    init_session_state()
+    sidebar()
+    
+    cv_upload_section()
+    smtp_setup_modal()
+    
+    col_chat, col_upload = st.columns([3, 1])
+    
+    with col_chat:
+        display_chat()
+    
+    with col_upload:
+        image_upload_section()
+        
+        st.markdown("---")
+        st.markdown("### Or tell me what to do:")
+        
+        examples = [
+            "Upload my CV",
+            "Add this scholarship post",
+            "Write email to professor",
+            "Apply for PhD position",
+            "Search my saved posts",
+            "Help"
+        ]
+        
+        for example in examples:
+            if st.button(example, key=f"example_{example}", use_container_width=True):
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": example
+                })
+                response = st.session_state.agent.chat(example)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response
+                })
+                st.rerun()
 
 if __name__ == "__main__":
     main()
