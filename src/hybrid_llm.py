@@ -1,29 +1,20 @@
-"""Hybrid LLM module - routes between local and API models."""
+"""Hybrid LLM module - runs Local Llama + Groq together."""
 
 import os
 import json
 from pathlib import Path
 from typing import Optional, Dict, List
 from dataclasses import dataclass
-from enum import Enum
-
-class ModelType(Enum):
-    LOCAL = "local"
-    GROQ = "groq"
 
 @dataclass
 class LLMConfig:
-    # Local model (Qwen 2.5 7B via Ollama)
-    local_model: str = "qwen2.5:7b"
+    # Local model (Llama 3.1 8B via Ollama)
+    local_model: str = "llama3.1:8b"
     local_base_url: str = "http://localhost:11434"
     
     # Groq API
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
-    
-    # Routing
-    use_local_for_draft: bool = True
-    use_groq_for_humanize: bool = True
     
     @classmethod
     def load(cls) -> "LLMConfig":
@@ -45,13 +36,11 @@ class LLMConfig:
                 "local_model": self.local_model,
                 "local_base_url": self.local_base_url,
                 "groq_api_key": self.groq_api_key,
-                "groq_model": self.groq_model,
-                "use_local_for_draft": self.use_local_for_draft,
-                "use_groq_for_humanize": self.use_groq_for_humanize
+                "groq_model": self.groq_model
             }, f, indent=2)
 
 class HybridLLM:
-    """Routes between local and API models."""
+    """Runs Local Llama for drafting + Groq for humanization together."""
     
     def __init__(self, config: Optional[LLMConfig] = None):
         self.config = config or LLMConfig.load()
@@ -59,7 +48,7 @@ class HybridLLM:
         self._groq_client = None
     
     def _check_local_available(self) -> bool:
-        """Check if Ollama is running with Qwen model."""
+        """Check if Ollama is running with Llama model."""
         if self._local_available is not None:
             return self._local_available
         
@@ -140,9 +129,23 @@ class HybridLLM:
         
         return response.choices[0].message.content
     
-    def draft_email(self, prompt: str, context: str = "") -> str:
-        """Draft initial email using local model."""
-        system = f"""You are a professional academic email writer. Write concise, specific, 
+    def hybrid_generate(self, prompt: str, context: str = "") -> Dict:
+        """
+        Hybrid pipeline:
+        1. Local Llama drafts the email
+        2. Local Llama checks AI patterns
+        3. Groq does final humanization
+        """
+        result = {
+            "draft": "",
+            "ai_analysis": {},
+            "humanized": "",
+            "local_used": False,
+            "groq_used": False
+        }
+        
+        # Step 1: Local Llama drafts email
+        draft_system = f"""You are a professional academic email writer. Write concise, specific, 
 human-like emails for scholarship/PhD applications. Be direct, avoid AI patterns.
 
 {context}
@@ -155,24 +158,27 @@ Rules:
 - Reference specific papers/projects when possible
 - Keep under 300 words"""
         
-        if self.config.use_local_for_draft and self._check_local_available():
-            return self._call_local(prompt, system)
-        elif self.config.groq_api_key:
-            return self._call_groq(prompt, system)
-        else:
-            return self._fallback_draft(prompt)
-    
-    def check_ai_patterns(self, text: str) -> Dict:
-        """Check text for AI patterns using local model."""
-        prompt = f"""Analyze this email for AI writing patterns. Return JSON with:
+        try:
+            if self._check_local_available():
+                result["draft"] = self._call_local(prompt, draft_system)
+                result["local_used"] = True
+            elif self.config.groq_api_key:
+                result["draft"] = self._call_groq(prompt, draft_system)
+            else:
+                result["draft"] = self._fallback_draft(prompt)
+        except Exception as e:
+            result["draft"] = self._fallback_draft(prompt)
+        
+        # Step 2: Local Llama checks AI patterns
+        check_prompt = f"""Analyze this email for AI writing patterns. Return JSON with:
 - "ai_score": 0-100 (higher = more AI-like)
 - "patterns_found": list of specific AI patterns found
 - "suggestions": list of specific fixes
 
 Email:
-{text}"""
+{result['draft']}"""
         
-        system = """You are an AI detection expert. Analyze text for common AI writing patterns:
+        check_system = """You are an AI detection expert. Analyze text for common AI writing patterns:
 - Overused phrases (furthermore, moreover, crucial, leverage, etc.)
 - Perfect paragraph structure
 - No contractions
@@ -184,33 +190,30 @@ Email:
 Return ONLY valid JSON."""
         
         try:
-            if self.config.use_local_for_draft and self._check_local_available():
-                response = self._call_local(prompt, system, max_tokens=1000)
+            if self._check_local_available():
+                response = self._call_local(check_prompt, check_system, max_tokens=1000)
             elif self.config.groq_api_key:
-                response = self._call_groq(prompt, system, max_tokens=1000)
+                response = self._call_groq(check_prompt, check_system, max_tokens=1000)
             else:
-                return {"ai_score": 50, "patterns_found": [], "suggestions": []}
+                response = '{"ai_score": 50, "patterns_found": [], "suggestions": []}'
             
-            # Extract JSON from response
             import re
             json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
-            
-            return {"ai_score": 50, "patterns_found": [], "suggestions": []}
-        
+                result["ai_analysis"] = json.loads(json_match.group())
+            else:
+                result["ai_analysis"] = {"ai_score": 50, "patterns_found": [], "suggestions": []}
         except Exception:
-            return {"ai_score": 50, "patterns_found": [], "suggestions": []}
-    
-    def humanize_text(self, text: str, ai_analysis: Dict) -> str:
-        """Final humanization pass using Groq API."""
-        patterns = ai_analysis.get("patterns_found", [])
-        suggestions = ai_analysis.get("suggestions", [])
+            result["ai_analysis"] = {"ai_score": 50, "patterns_found": [], "suggestions": []}
         
-        prompt = f"""Rewrite this email to sound more human and natural.
+        # Step 3: Groq final humanization
+        patterns = result["ai_analysis"].get("patterns_found", [])
+        suggestions = result["ai_analysis"].get("suggestions", [])
+        
+        humanize_prompt = f"""Rewrite this email to sound more human and natural.
 
 Original:
-{text}
+{result['draft']}
 
 Issues found:
 {json.dumps(patterns, indent=2)}
@@ -230,9 +233,77 @@ Rewrite rules:
 
 Return ONLY the rewritten email text, no explanations."""
         
-        system = """You are an expert at making AI-generated text sound human. 
+        humanize_system = """You are an expert at making AI-generated text sound human. 
 Your goal is to make the text undetectable by AI detection tools while maintaining 
 professional quality. Be creative and natural."""
+        
+        try:
+            if self.config.groq_api_key:
+                result["humanized"] = self._call_groq(humanize_prompt, humanize_system)
+                result["groq_used"] = True
+            elif self._check_local_available():
+                result["humanized"] = self._call_local(humanize_prompt, humanize_system)
+            else:
+                result["humanized"] = self._fallback_humanize(result["draft"])
+        except Exception:
+            result["humanized"] = result["draft"]
+        
+        return result
+    
+    def draft_email(self, prompt: str, context: str = "") -> str:
+        """Draft email (used by writer)."""
+        result = self.hybrid_generate(prompt, context)
+        return result["humanized"]
+    
+    def check_ai_patterns(self, text: str) -> Dict:
+        """Check for AI patterns."""
+        check_prompt = f"""Analyze this email for AI writing patterns. Return JSON with:
+- "ai_score": 0-100 (higher = more AI-like)
+- "patterns_found": list of specific AI patterns found
+- "suggestions": list of specific fixes
+
+Email:
+{text}"""
+        
+        check_system = """You are an AI detection expert. Analyze text for common AI writing patterns.
+Return ONLY valid JSON."""
+        
+        try:
+            if self._check_local_available():
+                response = self._call_local(check_prompt, check_system, max_tokens=1000)
+            elif self.config.groq_api_key:
+                response = self._call_groq(check_prompt, check_system, max_tokens=1000)
+            else:
+                return {"ai_score": 50, "patterns_found": [], "suggestions": []}
+            
+            import re
+            json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+            
+            return {"ai_score": 50, "patterns_found": [], "suggestions": []}
+        except Exception:
+            return {"ai_score": 50, "patterns_found": [], "suggestions": []}
+    
+    def humanize_text(self, text: str, ai_analysis: Dict) -> str:
+        """Humanize using Groq."""
+        patterns = ai_analysis.get("patterns_found", [])
+        suggestions = ai_analysis.get("suggestions", [])
+        
+        prompt = f"""Rewrite this email to sound more human and natural.
+
+Original:
+{text}
+
+Issues found:
+{json.dumps(patterns, indent=2)}
+
+Suggestions:
+{json.dumps(suggestions, indent=2)}
+
+Return ONLY the rewritten email text, no explanations."""
+        
+        system = """You are an expert at making AI-generated text sound human."""
         
         try:
             if self.config.groq_api_key:
@@ -245,7 +316,7 @@ professional quality. Be creative and natural."""
             return text
     
     def generate(self, prompt: str, system: str = "", use_groq: bool = False) -> str:
-        """General generation endpoint."""
+        """General generation."""
         if use_groq and self.config.groq_api_key:
             return self._call_groq(prompt, system)
         elif self._check_local_available():
@@ -253,7 +324,7 @@ professional quality. Be creative and natural."""
         elif self.config.groq_api_key:
             return self._call_groq(prompt, system)
         else:
-            return "No LLM available. Please configure Groq API or install Ollama."
+            return "No LLM available."
     
     def _fallback_draft(self, prompt: str) -> str:
         """Fallback when no LLM available."""
@@ -276,7 +347,6 @@ Best regards,
         
         result = text
         
-        # Add contractions
         contractions = {
             "I am": "I'm", "I have": "I've", "I will": "I'll",
             "do not": "don't", "does not": "doesn't", "did not": "didn't",

@@ -47,17 +47,13 @@ My background:
 Write a natural, human-sounding email. Be specific about their work. 
 Reference 1-2 specific papers if possible. Keep under 300 words."""
         
-        # Step 1: Draft with local model (or Groq fallback)
-        raw_email = self.llm.draft_email(prompt, context)
+        # Run hybrid pipeline: Local Llama drafts + checks, Groq humanizes
+        pipeline_result = self.llm.hybrid_generate(prompt, context)
         
-        # Step 2: Check for AI patterns
-        ai_analysis = self.llm.check_ai_patterns(raw_email)
-        
-        # Step 3: Humanize using pattern replacement
-        humanization = self.humanizer.humanize(raw_email)
-        
-        # Step 4: Final humanization pass with Groq
-        final_text = self.llm.humanize_text(humanization.humanized, ai_analysis)
+        # Extract results
+        raw_email = pipeline_result["draft"]
+        ai_analysis = pipeline_result["ai_analysis"]
+        final_text = pipeline_result["humanized"]
         
         # Extract subject
         subject = f"Interest in {research_topic} - Potential Collaboration"
@@ -70,7 +66,10 @@ Reference 1-2 specific papers if possible. Keep under 300 words."""
                 original=raw_email,
                 humanized=final_text,
                 patterns_found=ai_analysis.get("patterns_found", []),
-                changes_made=["Hybrid LLM processing"],
+                changes_made=[
+                    f"Local Llama: {'Used' if pipeline_result['local_used'] else 'Skipped'}",
+                    f"Groq Humanize: {'Used' if pipeline_result['groq_used'] else 'Skipped'}"
+                ],
                 confidence_score=1.0 - (ai_analysis.get("ai_score", 50) / 100)
             ),
             ai_analysis=ai_analysis,
@@ -101,17 +100,12 @@ My background:
 Write a compelling, human-sounding application. Show genuine passion.
 Be specific about achievements and goals. Keep under 500 words."""
         
-        # Step 1: Draft
-        raw_email = self.llm.draft_email(prompt, context)
+        # Run hybrid pipeline
+        pipeline_result = self.llm.hybrid_generate(prompt, context)
         
-        # Step 2: Check AI patterns
-        ai_analysis = self.llm.check_ai_patterns(raw_email)
-        
-        # Step 3: Humanize
-        humanization = self.humanizer.humanize(raw_email)
-        
-        # Step 4: Final pass
-        final_text = self.llm.humanize_text(humanization.humanized, ai_analysis)
+        raw_email = pipeline_result["draft"]
+        ai_analysis = pipeline_result["ai_analysis"]
+        final_text = pipeline_result["humanized"]
         
         return GeneratedEmail(
             to_email=opportunity.professor_email or "",
@@ -121,7 +115,10 @@ Be specific about achievements and goals. Keep under 500 words."""
                 original=raw_email,
                 humanized=final_text,
                 patterns_found=ai_analysis.get("patterns_found", []),
-                changes_made=["Hybrid LLM processing"],
+                changes_made=[
+                    f"Local Llama: {'Used' if pipeline_result['local_used'] else 'Skipped'}",
+                    f"Groq Humanize: {'Used' if pipeline_result['groq_used'] else 'Skipped'}"
+                ],
                 confidence_score=1.0 - (ai_analysis.get("ai_score", 50) / 100)
             ),
             ai_analysis=ai_analysis,
@@ -148,10 +145,12 @@ My background:
 Write a short, polite follow-up. Reference the original email.
 Add new value (recent achievement or paper). Keep under 150 words."""
         
-        raw_email = self.llm.draft_email(prompt, context)
-        ai_analysis = self.llm.check_ai_patterns(raw_email)
-        humanization = self.humanizer.humanize(raw_email)
-        final_text = self.llm.humanize_text(humanization.humanized, ai_analysis)
+        # Run hybrid pipeline
+        pipeline_result = self.llm.hybrid_generate(prompt, context)
+        
+        raw_email = pipeline_result["draft"]
+        ai_analysis = pipeline_result["ai_analysis"]
+        final_text = pipeline_result["humanized"]
         
         return GeneratedEmail(
             to_email=original_email.to_email,
@@ -161,7 +160,10 @@ Add new value (recent achievement or paper). Keep under 150 words."""
                 original=raw_email,
                 humanized=final_text,
                 patterns_found=[],
-                changes_made=["Hybrid LLM processing"],
+                changes_made=[
+                    f"Local Llama: {'Used' if pipeline_result['local_used'] else 'Skipped'}",
+                    f"Groq Humanize: {'Used' if pipeline_result['groq_used'] else 'Skipped'}"
+                ],
                 confidence_score=0.9
             ),
             ai_analysis=ai_analysis,
