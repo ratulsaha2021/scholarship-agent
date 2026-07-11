@@ -10,8 +10,12 @@ from src.resource_loader import UserResources, create_sample_resources
 from src.humanizer import Humanizer
 from src.discovery import OpportunityDiscovery, Opportunity, create_sample_targets
 from src.writer import EmailWriter, GeneratedEmail
+from src.cv_extractor import CVExtractor, ExtractedCV
+from src.rag_store import RAGStore, ApplicationPost, PostProcessor
+from src.ocr_processor import OCRProcessor
 
 RESOURCES_DIR = Path(__file__).parent / "resources"
+DATA_DIR = Path(__file__).parent / "data"
 
 st.set_page_config(
     page_title="Scholarship Agent",
@@ -27,6 +31,14 @@ def load_config():
 def load_humanizer():
     return Humanizer(level="high")
 
+@st.cache_resource
+def load_rag_store():
+    return RAGStore()
+
+@st.cache_resource
+def load_ocr():
+    return OCRProcessor()
+
 def load_resources():
     return UserResources.load(RESOURCES_DIR)
 
@@ -37,6 +49,8 @@ def init_session_state():
         st.session_state.opportunities = []
     if "resources_loaded" not in st.session_state:
         st.session_state.resources_loaded = False
+    if "extracted_cv" not in st.session_state:
+        st.session_state.extracted_cv = None
 
 def sidebar():
     with st.sidebar:
@@ -45,13 +59,17 @@ def sidebar():
         
         page = st.radio(
             "Navigation",
-            ["Setup", "Discover", "Write Email", "Apply to Scholarship", "Saved Emails"],
+            ["Setup", "CV Extract", "Add Posts", "Discover", "Write Email", "Apply to Scholarship", "Saved Emails"],
             index=0
         )
         
         st.markdown("---")
         st.markdown("### Quick Stats")
         st.metric("Generated Emails", len(st.session_state.generated_emails))
+        
+        rag_store = load_rag_store()
+        stats = rag_store.get_stats()
+        st.metric("Saved Posts", stats["total_posts"])
         
         return page
 
@@ -85,14 +103,6 @@ def setup_page():
         )
     
     with col2:
-        st.subheader("Upload CV")
-        cv_file = st.file_uploader("Upload PDF or Word", type=["pdf", "docx", "txt"])
-        
-        if cv_file:
-            cv_path = RESOURCES_DIR / f"cv{Path(cv_file.name).suffix}"
-            cv_path.write_bytes(cv_file.read())
-            st.success(f"CV saved: {cv_file.name}")
-        
         st.subheader("Additional Notes")
         notes = st.text_area(
             "Any extra info you want included",
@@ -148,6 +158,167 @@ def setup_page():
         st.success("Profile saved!")
         st.session_state.resources_loaded = False
 
+def cv_extract_page():
+    st.header("📄 CV Auto-Extract")
+    
+    st.info("Upload your CV and the agent will automatically extract all your information.")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        cv_file = st.file_uploader("Upload CV (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"], key="cv_upload")
+        
+        if cv_file:
+            with st.spinner("Extracting information from CV..."):
+                extractor = CVExtractor()
+                
+                temp_path = RESOURCES_DIR / f"temp_cv{Path(cv_file.name).suffix}"
+                temp_path.write_bytes(cv_file.read())
+                
+                try:
+                    extracted = extractor.extract_from_file(temp_path)
+                    st.session_state.extracted_cv = extracted
+                    st.success("CV extracted successfully!")
+                except Exception as e:
+                    st.error(f"Extraction failed: {e}")
+                finally:
+                    temp_path.unlink(missing_ok=True)
+    
+    with col2:
+        if st.session_state.extracted_cv:
+            cv = st.session_state.extracted_cv
+            
+            st.subheader("Extracted Information")
+            
+            with st.expander("Personal Info", expanded=True):
+                st.text_input("Name", value=cv.name, key="cv_name")
+                st.text_input("Email", value=cv.email, key="cv_email")
+                st.text_input("Phone", value=cv.phone, key="cv_phone")
+            
+            with st.expander("Summary"):
+                st.text_area("Summary", value=cv.summary, height=100, key="cv_summary")
+            
+            with st.expander("Education"):
+                for i, edu in enumerate(cv.education):
+                    st.write(f"**{edu.get('degree', 'N/A')}** - {edu.get('institution', 'N/A')} ({edu.get('year', 'N/A')})")
+            
+            with st.expander("Experience"):
+                for exp in cv.experience:
+                    st.write(f"**{exp.get('title', 'N/A')}** at {exp.get('organization', 'N/A')}")
+                    if exp.get('description'):
+                        st.caption(exp['description'][:150])
+            
+            with st.expander("Skills"):
+                st.write(", ".join(cv.skills))
+            
+            with st.expander("Publications"):
+                for pub in cv.publications:
+                    st.write(f"- {pub}")
+            
+            if st.button("Save to Profile", type="primary", key="save_cv"):
+                user_data = cv.to_dict()
+                user_data["research_interests"] = []
+                user_data["target_universities"] = []
+                
+                RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+                with open(RESOURCES_DIR / "user_data.json", "w") as f:
+                    json.dump(user_data, f, indent=2)
+                
+                st.success("CV data saved to profile!")
+                st.session_state.resources_loaded = False
+
+def add_posts_page():
+    st.header("📝 Add Application Posts")
+    
+    st.info("Add scholarship/position posts via text or image. The agent will store them using RAG for intelligent matching.")
+    
+    rag_store = load_rag_store()
+    ocr = load_ocr()
+    processor = PostProcessor()
+    
+    tab1, tab2, tab3 = st.tabs(["Paste Text", "Upload Image", "View Saved Posts"])
+    
+    with tab1:
+        st.subheader("Paste Post Text")
+        
+        post_text = st.text_area(
+            "Paste the scholarship/position announcement here",
+            height=200,
+            key="post_text_input"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            post_type = st.selectbox("Post Type", ["scholarship", "phd_position", "professor", "job"], key="post_type_text")
+        with col2:
+            post_title = st.text_input("Title (optional)", key="post_title_text")
+        
+        if st.button("Add Post", type="primary", key="add_text_post"):
+            if post_text:
+                post = processor.process_text(post_text, post_type)
+                if post_title:
+                    post.title = post_title
+                
+                post_id = rag_store.add_post(post)
+                st.success(f"Post added! ID: {post_id}")
+                st.rerun()
+            else:
+                st.warning("Please paste some text")
+    
+    with tab2:
+        st.subheader("Upload Image of Post")
+        
+        if not ocr.is_available():
+            st.warning("OCR not available. Install with: `pip install pytesseract Pillow`")
+            st.code("sudo apt-get install tesseract-ocr")
+        else:
+            image_file = st.file_uploader("Upload screenshot/photo of the post", type=["png", "jpg", "jpeg"], key="image_upload")
+            
+            if image_file:
+                st.image(image_file, caption="Uploaded Image", use_column_width=True)
+                
+                post_type_img = st.selectbox("Post Type", ["scholarship", "phd_position", "professor", "job"], key="post_type_img")
+                
+                if st.button("Extract & Add Post", type="primary", key="add_image_post"):
+                    with st.spinner("Extracting text from image..."):
+                        try:
+                            ocr_text = ocr.extract_text_from_bytes(image_file.read(), image_file.name)
+                            
+                            if ocr_text:
+                                st.subheader("Extracted Text")
+                                st.text_area("OCR Result", value=ocr_text, height=150, disabled=True, key="ocr_result")
+                                
+                                post = processor.process_image_text(ocr_text, post_type_img)
+                                post_id = rag_store.add_post(post)
+                                st.success(f"Post added! ID: {post_id}")
+                            else:
+                                st.warning("No text found in image")
+                        except Exception as e:
+                            st.error(f"OCR failed: {e}")
+    
+    with tab3:
+        st.subheader("Saved Posts")
+        
+        posts = rag_store.get_all_posts()
+        
+        if not posts:
+            st.info("No posts saved yet.")
+        else:
+            st.write(f"**Total:** {len(posts)} posts")
+            
+            for post in posts:
+                meta = post.get("metadata", {})
+                with st.expander(f"{meta.get('title', 'Untitled')} - {meta.get('institution', 'Unknown')}"):
+                    st.write(f"**Type:** {meta.get('post_type', 'N/A')}")
+                    st.write(f"**Institution:** {meta.get('institution', 'N/A')}")
+                    if meta.get('deadline'):
+                        st.write(f"**Deadline:** {meta['deadline']}")
+                    st.text_area("Content", value=post.get("content", ""), height=150, disabled=True, key=f"post_{post['id']}")
+                    
+                    if st.button("Delete", key=f"delete_post_{post['id']}"):
+                        rag_store.delete_post(post["id"])
+                        st.rerun()
+
 def discover_page():
     st.header("🔍 Discover Opportunities")
     
@@ -178,6 +349,21 @@ def discover_page():
             
             st.session_state.opportunities = opportunities
             st.success(f"Found {len(opportunities)} opportunities")
+        
+        st.subheader("Or Search Saved Posts")
+        rag_store = load_rag_store()
+        
+        rag_query = st.text_input("Search your saved posts")
+        if rag_query:
+            results = rag_store.search(rag_query, n_results=5)
+            
+            if results:
+                for result in results:
+                    meta = result.get("metadata", {})
+                    with st.expander(f"{meta.get('title', 'Untitled')} (Score: {result.get('score', 0):.2f})"):
+                        st.write(f"**Type:** {meta.get('post_type', 'N/A')}")
+                        st.write(f"**Institution:** {meta.get('institution', 'N/A')}")
+                        st.text_area("Content", value=result.get("content", ""), height=150, disabled=True, key=f"rag_{meta.get('title', '')}")
     
     with col2:
         st.subheader("Add Manual Target")
@@ -275,38 +461,86 @@ def apply_page():
     resources = load_resources()
     humanizer = load_humanizer()
     writer = EmailWriter(resources, humanizer)
+    rag_store = load_rag_store()
     
-    if not st.session_state.opportunities:
-        st.warning("No opportunities loaded. Go to Discover page first.")
-        return
+    tab1, tab2 = st.tabs(["From Discovered", "From Saved Posts"])
     
-    scholarships = [o for o in st.session_state.opportunities if o.type in ["scholarship", "phd_position"]]
-    
-    if not scholarships:
-        st.warning("No scholarships found in discovered opportunities.")
-        return
-    
-    selected = st.selectbox(
-        "Select Scholarship",
-        options=scholarships,
-        format_func=lambda x: f"{x.title} - {x.institution}"
-    )
-    
-    if selected:
-        st.subheader(selected.title)
-        st.write(f"**Institution:** {selected.institution}")
-        st.write(f"**Deadline:** {selected.deadline or 'N/A'}")
-        if selected.description:
-            st.write(f"**Description:** {selected.description}")
-        
-        additional = st.text_area("Additional information to include", key="additional_info")
-        
-        if st.button("Generate Application", type="primary"):
-            with st.spinner("Generating application..."):
-                generated = writer.write_scholarship_application(selected, additional or None)
+    with tab1:
+        if not st.session_state.opportunities:
+            st.info("No opportunities loaded. Go to Discover page first.")
+        else:
+            scholarships = [o for o in st.session_state.opportunities if o.type in ["scholarship", "phd_position"]]
             
-            st.session_state.generated_emails.append(generated)
-            display_generated_email(generated)
+            if not scholarships:
+                st.info("No scholarships found in discovered opportunities.")
+            else:
+                selected = st.selectbox(
+                    "Select Scholarship",
+                    options=scholarships,
+                    format_func=lambda x: f"{x.title} - {x.institution}",
+                    key="select_scholarship"
+                )
+                
+                if selected:
+                    st.subheader(selected.title)
+                    st.write(f"**Institution:** {selected.institution}")
+                    st.write(f"**Deadline:** {selected.deadline or 'N/A'}")
+                    if selected.description:
+                        st.write(f"**Description:** {selected.description}")
+                    
+                    additional = st.text_area("Additional information to include", key="additional_info_1")
+                    
+                    if st.button("Generate Application", type="primary", key="gen_app_1"):
+                        with st.spinner("Generating application..."):
+                            generated = writer.write_scholarship_application(selected, additional or None)
+                        
+                        st.session_state.generated_emails.append(generated)
+                        display_generated_email(generated)
+    
+    with tab2:
+        posts = rag_store.get_all_posts()
+        
+        if not posts:
+            st.info("No saved posts. Go to Add Posts page first.")
+        else:
+            post_options = [p for p in posts if p.get("metadata", {}).get("post_type") in ["scholarship", "phd_position"]]
+            
+            if not post_options:
+                st.info("No scholarship posts saved.")
+            else:
+                selected_post = st.selectbox(
+                    "Select Saved Post",
+                    options=post_options,
+                    format_func=lambda x: f"{x.get('metadata', {}).get('title', 'Untitled')} - {x.get('metadata', {}).get('institution', 'Unknown')}",
+                    key="select_saved_post"
+                )
+                
+                if selected_post:
+                    meta = selected_post.get("metadata", {})
+                    st.subheader(meta.get("title", "Untitled"))
+                    st.write(f"**Institution:** {meta.get('institution', 'N/A')}")
+                    if meta.get('deadline'):
+                        st.write(f"**Deadline:** {meta['deadline']}")
+                    st.text_area("Content", value=selected_post.get("content", ""), height=150, disabled=True, key="selected_post_content")
+                    
+                    additional = st.text_area("Additional information to include", key="additional_info_2")
+                    
+                    if st.button("Generate Application", type="primary", key="gen_app_2"):
+                        post_obj = ApplicationPost(
+                            id=selected_post["id"],
+                            title=meta.get("title", ""),
+                            institution=meta.get("institution", ""),
+                            content=selected_post.get("content", ""),
+                            post_type=meta.get("post_type", "scholarship"),
+                            deadline=meta.get("deadline", ""),
+                            requirements=meta.get("requirements", "")
+                        )
+                        
+                        with st.spinner("Generating application..."):
+                            generated = writer.write_scholarship_application(post_obj, additional or None)
+                        
+                        st.session_state.generated_emails.append(generated)
+                        display_generated_email(generated)
 
 def display_generated_email(email: GeneratedEmail):
     st.markdown("---")
@@ -396,6 +630,10 @@ def main():
     
     if page == "Setup":
         setup_page()
+    elif page == "CV Extract":
+        cv_extract_page()
+    elif page == "Add Posts":
+        add_posts_page()
     elif page == "Discover":
         discover_page()
     elif page == "Write Email":
