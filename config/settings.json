@@ -1,0 +1,20 @@
+{
+  "model": {
+    "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+    "max_length": 2048,
+    "temperature": 0.8,
+    "top_p": 0.9,
+    "load_in_4bit": true
+  },
+  "humanization": {
+    "level": "high",
+    "avoid_ai_patterns": true,
+    "use_wikipedia_analysis": true,
+    "variation_strength": 0.7
+  },
+  "discovery": {
+    "scrape_enabled": true,
+    "max_results_per_search": 10,
+    "delay_between_requests": 2.0
+  }
+}

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Resources (user data)
+resources/cv.pdf
+resources/cv.docx
+resources/user_data.json
+resources/saved_responses/
+resources/targets.json
+
+# Model cache
+.cache/
+models/
+
+# Logs
+*.log

@@ -1,0 +1,1 @@
+"""Scholarship & PhD Application Agent."""
