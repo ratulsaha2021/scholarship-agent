@@ -98,10 +98,13 @@ class ChatAgent:
         if any(w in ml for w in ["help", "what can you do"]):
             return self._handle_help()
 
-        if any(w in ml for w in ["cv", "resume", "profile", "my info", "status"]):
+        if any(w in ml for w in ["cv", "resume", "profile", "my info", "status", "about me", "who am i"]):
             return self._show_status()
 
-        if any(w in ml for w in ["write", "draft", "generate", "apply"]):
+        if any(w in ml for w in ["my project", "my publication", "my skill", "my education", "my experience"]):
+            return self._show_detailed_profile(message)
+
+        if any(w in ml for w in ["write", "draft", "generate"]):
             return self._handle_write()
 
         if any(w in ml for w in ["send"]):
@@ -113,7 +116,11 @@ class ChatAgent:
         if any(w in ml for w in ["setup groq", "api key"]):
             return self._handle_setup_groq(message)
 
-        return ("Please paste the scholarship/position announcement, or upload a screenshot.\n\n"
+        # If a post is loaded, treat as modification or question
+        if self.current_post:
+            return self._handle_post_question(message)
+
+        return ("Paste a scholarship/position announcement, or upload a screenshot.\n\n"
                 "I'll parse it and guide you through the application.")
 
     def _process_post(self, text):
@@ -476,3 +483,72 @@ Return the edited email. Keep it concise and professional."""
         resp += "Configured" if self.email_sender.is_configured() else "Not configured"
 
         return resp
+
+    def _show_detailed_profile(self, message):
+        ml = message.lower()
+        resp = ""
+
+        if "project" in ml:
+            resp = "**Your Projects:**\n\n"
+            if self.resources.experience:
+                for exp in self.resources.experience:
+                    resp += f"- **{exp.get('title', 'Project')}** at {exp.get('organization', '')}\n"
+                    if exp.get("description"):
+                        resp += f"  {exp['description'][:150]}\n"
+            else:
+                resp = "No projects found. Upload your CV or add them manually."
+
+        elif "publication" in ml:
+            if self.resources.publications:
+                resp = "**Your Publications:**\n\n"
+                for i, pub in enumerate(self.resources.publications, 1):
+                    resp += f"{i}. {pub}\n"
+            else:
+                resp = "No publications found. Upload your CV or add them."
+
+        elif "skill" in ml:
+            if self.resources.skills:
+                resp = "**Your Skills:**\n\n" + ", ".join(self.resources.skills)
+            else:
+                resp = "No skills found. Upload your CV or add them."
+
+        elif "education" in ml:
+            if self.resources.education:
+                resp = "**Your Education:**\n\n"
+                for e in self.resources.education:
+                    resp += f"- {e.get('degree', '')} in {e.get('field', '')} from {e.get('institution', '')} ({e.get('year', '')})\n"
+            else:
+                resp = "No education found. Upload your CV or add it."
+
+        elif "experience" in ml:
+            if self.resources.experience:
+                resp = "**Your Experience:**\n\n"
+                for exp in self.resources.experience:
+                    resp += f"- {exp.get('title', '')} at {exp.get('organization', '')} ({exp.get('duration', '')})\n"
+                    if exp.get("description"):
+                        resp += f"  {exp['description'][:150]}\n"
+            else:
+                resp = "No experience found. Upload your CV or add it."
+
+        else:
+            resp = self._show_status()
+
+        return resp
+
+    def _handle_post_question(self, message):
+        """Handle questions when a post is loaded."""
+        if not self.current_post:
+            return "No post loaded. Paste one first."
+
+        prompt = f"""The user has this loaded post:
+Title: {self.current_post['title']}
+Institution: {self.current_post['institution']}
+
+User asks: {message}
+
+Give a brief, helpful answer. If it's about the user's fit for the position, reference their profile."""
+
+        try:
+            return self.llm.generate(prompt, use_groq=True)
+        except Exception:
+            return "I can help with that. Try 'write' to generate the email, or ask something specific."
