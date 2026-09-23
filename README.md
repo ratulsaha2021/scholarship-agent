@@ -1,91 +1,146 @@
 # Scholarship & PhD Application Agent
 
-An AI agent that automatically applies for Master's/PhD scholarships and sends professional emails to professors. Built with Llama 3.1 8B Instruct for humanized, professional writing.
+A chat assistant that turns a scholarship/PhD position post into a personalised, human-sounding application email, and can send it for you.
 
-## Features
+Paste a post (or upload a screenshot), and the agent:
 
-- **Humanized Writing**: Avoids AI detection patterns using Wikipedia-based analysis
-- **Auto-Apply**: Discovers and applies to scholarships/PhD positions
-- **Professor Emails**: Generates personalized, professional emails
-- **Resource Management**: Loads your CV, research interests, and templates
-- **Dual Discovery**: Manual URL list + web scraping for opportunities
+1. Parses the title, institution, deadline, contact email and any required subject line
+2. Uses your CV/profile to draft a short, specific email (no invented facts)
+3. Lets you edit it in plain language ("make it shorter", "mention my TB paper")
+4. Sends it over SMTP with your CV attached, only after you explicitly confirm
+
+## How it works
+
+Drafting runs as a pipeline in `src/hybrid_llm.py`:
+
+| Step | Preferred model | Fallback |
+|------|-----------------|----------|
+| Draft email | Local model via [Ollama](https://ollama.com) | Groq |
+| Check for AI-writing patterns | Local model via Ollama | Groq |
+| Final humanising rewrite | Groq | Local model |
+
+You need **at least one** of Ollama or a Groq API key. If neither works, the agent reports the error rather than producing a placeholder email.
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Install dependencies
+
+With [uv](https://docs.astral.sh/uv/) (recommended):
+
+```bash
+uv sync
+```
+
+Or with pip:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Download Model (First Run)
+Optional, for reading screenshots of posts:
 
-The agent will automatically download Llama 3.1 8B Instruct on first run (~4.7GB).
-
-### 3. Configure Resources
-
-Place your files in `resources/`:
-- `cv.pdf` or `cv.docx` - Your CV/Resume
-- `research_interests.txt` - Your research areas
-- `cover_letter_template.txt` - Optional cover letter template
-- `targets.json` - List of target URLs/emails
-
-### 4. Run the Agent
-
-**Web UI (Recommended):**
 ```bash
-streamlit run web_app.py
-```
-Then open http://localhost:8501 in your browser.
-
-**CLI Mode:**
-```bash
-# Interactive mode
-python -m src.agent
-
-# Auto-apply to all targets
-python -m src.agent --auto
-
-# Generate email for specific professor
-python -m src.agent --professor "professor@university.edu"
+sudo apt-get install tesseract-ocr
 ```
 
-## Project Structure
+### 2. Configure a model
+
+**Groq (cloud, free tier available):** get a key from https://console.groq.com/keys, then either type `setup groq gsk_...` in the chat or `export GROQ_API_KEY=gsk_...`.
+
+**Ollama (local):**
+
+```bash
+ollama pull llama3.1:8b
+```
+
+Model names and the Groq key are stored in `config/llm_config.json` (gitignored), which is created the first time you save a setting:
+
+```json
+{
+  "local_model": "llama3.1:8b",
+  "local_base_url": "http://localhost:11434",
+  "groq_api_key": "gsk_...",
+  "groq_model": "openai/gpt-oss-120b"
+}
+```
+
+Groq retires models from time to time. If generation fails with `model_not_found`, pick a current model from https://console.groq.com/docs/models.
+
+### 3. Run
+
+```bash
+uv run streamlit run web_app.py
+```
+
+Open http://localhost:8501.
+
+## Using the chat
+
+1. **Upload your CV** (PDF/DOCX/TXT) from the sidebar. It's parsed into `resources/user_data.json` and kept as `resources/cv.<ext>` so it can be attached to emails.
+2. **Paste a post** (at least ~20 words), or upload a screenshot of one.
+3. Type **`write`** to draft the email.
+4. Refine it: anything you type is treated as an edit instruction.
+5. Type **`send`** to send.
+
+| Command | What it does |
+|---------|--------------|
+| `write` | Draft an email for the loaded post |
+| `send` / `yes` | Send the drafted email (short, explicit confirmations only) |
+| `to: prof@uni.edu` | Set the recipient if the post didn't include one |
+| `cancel` | Discard the draft |
+| `status` | Show your profile and model/email status |
+| `my skills`, `my publications`, … | Show parts of your profile |
+| `setup email gmail` (or `outlook`, `yahoo`) | Start email setup |
+| `email: you@gmail.com password: app-password` | Save SMTP credentials (tested before saving) |
+| `setup groq KEY` | Save a Groq API key |
+
+For Gmail, use an [App Password](https://myaccount.google.com/apppasswords), not your normal password. Credentials are stored in `config/email_config.json` (gitignored).
+
+## CLI mode (legacy)
+
+There is also a Rich-based CLI for writing cold emails to professors and working through a list of targets in `resources/targets.json`:
+
+```bash
+uv run python -m src.agent --setup      # create sample resources/targets
+uv run python -m src.agent              # interactive menu
+uv run python -m src.agent --auto       # draft emails for all targets
+uv run python -m src.agent --professor "Jane Doe" --email jane@uni.edu --topic "graph neural networks"
+```
+
+CLI drafts are saved to `resources/saved_responses/` and are never sent automatically.
+
+## Project structure
 
 ```
 scholarship-agent/
+├── web_app.py              # Streamlit chat UI (main entry point)
 ├── src/
-│   ├── agent.py              # Main agent orchestrator
-│   ├── humanizer.py          # AI pattern detection & avoidance
-│   ├── resource_loader.py    # PDF/Word parsing
-│   ├── discovery.py          # Opportunity discovery
-│   ├── writer.py             # Email/scholarship writer
-│   └── config.py             # Configuration
-├── web_app.py                # Web UI (Streamlit)
-├── resources/
-│   ├── templates/            # Email templates
-│   └── saved_responses/      # Generated outputs
+│   ├── chat_agent.py       # Chat flow: post → CV → draft → edit → send
+│   ├── hybrid_llm.py       # Ollama + Groq pipeline
+│   ├── writer.py           # Email prompts
+│   ├── humanizer.py        # Rule-based AI-pattern detection
+│   ├── cv_extractor.py     # CV parsing (PDF/DOCX/TXT)
+│   ├── rag_store.py        # Post parsing + local post store (data/posts.json)
+│   ├── ocr_processor.py    # Screenshot OCR (tesseract)
+│   ├── email_sender.py     # SMTP sending with attachments
+│   ├── resource_loader.py  # Loads the user profile from resources/
+│   ├── discovery.py        # Target loading / scraping (CLI)
+│   ├── agent.py            # CLI entry point
+│   └── config.py           # config/settings.json loader
 ├── config/
-│   └── ai_patterns.json      # AI writing patterns to avoid
-├── requirements.txt
-└── README.md
+│   ├── settings.json       # Humanisation/discovery settings
+│   └── ai_patterns.json    # AI-writing patterns to avoid
+├── resources/              # Your CV and profile (gitignored)
+├── data/                   # Saved posts (gitignored)
+└── tests/                  # pytest suite
 ```
 
-## How Humanization Works
+## Tests
 
-1. **Pattern Analysis**: Loads AI writing patterns from Wikipedia/research
-2. **Avoidance Rules**: Creates rules to avoid common AI tells
-3. **Style Matching**: Matches human academic writing style
-4. **Variety Injection**: Adds natural variation to prevent detection
-
-## Configuration
-
-Edit `config/settings.json`:
-```json
-{
-  "model": "meta-llama/Llama-3.1-8B-Instruct",
-  "max_length": 2048,
-  "temperature": 0.8,
-  "humanization_level": "high"
-}
+```bash
+uv run --group dev pytest
 ```
+
+## Privacy
+
+Your CV, profile, saved posts, API keys and SMTP credentials stay on your machine in gitignored files. Post text and your profile are sent to Groq when Groq is used.

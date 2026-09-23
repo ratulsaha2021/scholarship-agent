@@ -3,8 +3,9 @@
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from dataclasses import dataclass
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
@@ -55,25 +56,32 @@ class EmailSender:
         subject: str,
         body: str,
         from_name: str = "",
-        reply_to: Optional[str] = None
+        reply_to: Optional[str] = None,
+        attachments: Optional[List[Path]] = None
     ) -> Dict:
         """Send an email."""
         if not self.is_configured():
             return {
                 "success": False,
-                "error": "Email not configured. Go to Settings to set up SMTP."
+                "error": "Email not configured. Type 'setup email gmail' to set up SMTP."
             }
         
         try:
             msg = MIMEMultipart()
             msg['From'] = f"{from_name} <{self.config.email_address}>" if from_name else self.config.email_address
             msg['To'] = to_email
-            msg['Subject'] = subject
+            # Collapse newlines so a multi-line subject can't break the headers
+            msg['Subject'] = " ".join(subject.split())
             
             if reply_to:
                 msg['Reply-To'] = reply_to
             
             msg.attach(MIMEText(body, 'plain'))
+
+            for path in attachments or []:
+                part = MIMEApplication(Path(path).read_bytes(), Name=Path(path).name)
+                part['Content-Disposition'] = f'attachment; filename="{Path(path).name}"'
+                msg.attach(part)
             
             with smtplib.SMTP(self.config.smtp_server, self.config.smtp_port) as server:
                 if self.config.use_tls:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from .humanizer import Humanizer, HumanizationResult
 from .resource_loader import UserResources
 from .discovery import Opportunity
-from .hybrid_llm import HybridLLM, LLMConfig
+from .hybrid_llm import HybridLLM, LLMConfig, NO_FABRICATION_RULE
 
 @dataclass
 class GeneratedEmail:
@@ -16,6 +16,7 @@ class GeneratedEmail:
     humanization_result: HumanizationResult
     ai_analysis: Optional[Dict] = None
     opportunity: Optional[Opportunity] = None
+    error: str = ""  # set when no LLM produced the draft (body is a placeholder template)
 
 class EmailWriter:
     """Generates professional, humanized emails using hybrid LLM."""
@@ -73,13 +74,15 @@ Reference 1-2 specific papers if possible. Keep under 300 words."""
                 confidence_score=1.0 - (ai_analysis.get("ai_score", 50) / 100)
             ),
             ai_analysis=ai_analysis,
-            opportunity=opportunity
+            opportunity=opportunity,
+            error=pipeline_result.get("error", "") if pipeline_result.get("fallback") else ""
         )
     
     def write_scholarship_application(
         self,
         opportunity,
-        additional_info: Optional[str] = None
+        additional_info: Optional[str] = None,
+        cv_attached: bool = False
     ) -> GeneratedEmail:
         """Write a scholarship application using hybrid LLM."""
         
@@ -88,6 +91,11 @@ Reference 1-2 specific papers if possible. Keep under 300 words."""
         # Support both Opportunity (has description) and ApplicationPost (has content)
         desc = getattr(opportunity, "content", None) or getattr(opportunity, "description", "")
         
+        if cv_attached:
+            closing_rule = 'say "I\'ve attached my CV for your review."'
+        else:
+            closing_rule = "offer to send my CV and other documents on request. Do NOT claim anything is attached."
+
         prompt = f"""Write a PhD/scholarship application email for:
 
 Title: {opportunity.title}
@@ -106,11 +114,12 @@ STRICT RULES:
 3. Start with "Dear Dr. [Last Name]," or "Dear Professor [Last Name],"
 4. First sentence: state the specific position and one reason you're interested
 5. Second paragraph: ONE specific project/skill that matches their research
-6. Final sentence: "I have attached my CV, transcript, and research statement."
+6. Final sentence: {closing_rule}
 7. Sign off with "Best regards," then name
 8. Do NOT use: "I am writing to express", "I believe", "I think", "Furthermore", "Moreover"
 9. Use contractions (I'm, don't, can't)
-10. Do NOT mention "interdisciplinary" or "collaboration" unless the post specifically asks for it"""
+10. Do NOT mention "interdisciplinary" or "collaboration" unless the post specifically asks for it
+11. {NO_FABRICATION_RULE}"""
         
         # Run hybrid pipeline
         pipeline_result = self.llm.hybrid_generate(prompt, context)
@@ -127,6 +136,7 @@ STRICT RULES:
         # Use subject format from post if specified, otherwise default
         if subject_format:
             subject = subject_format.replace("Your Name", self.resources.name or "Applicant")
+            subject = " ".join(subject.split())
         else:
             subject = f"Application for {opportunity.title}"
         
@@ -145,7 +155,8 @@ STRICT RULES:
                 confidence_score=1.0 - (ai_analysis.get("ai_score", 50) / 100)
             ),
             ai_analysis=ai_analysis,
-            opportunity=opportunity
+            opportunity=opportunity,
+            error=pipeline_result.get("error", "") if pipeline_result.get("fallback") else ""
         )
     
     def write_follow_up(

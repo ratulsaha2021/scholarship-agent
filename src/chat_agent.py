@@ -14,9 +14,21 @@ from .cv_extractor import CVExtractor, ExtractedCV
 from .rag_store import RAGStore, ApplicationPost, PostProcessor
 from .ocr_processor import OCRProcessor
 from .email_sender import EmailSender, EmailConfig
-from .hybrid_llm import HybridLLM, LLMConfig
+from .hybrid_llm import HybridLLM, LLMConfig, NO_FABRICATION_RULE
 
 RESOURCES_DIR = Path(__file__).parent.parent / "resources"
+CV_EXTENSIONS = ["pdf", "docx", "txt"]
+EMAIL_RE = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+SMTP_PROVIDERS = {
+    "gmail": ("smtp.gmail.com", 587),
+    "outlook": ("smtp-mail.outlook.com", 587),
+    "yahoo": ("smtp.mail.yahoo.com", 587),
+}
+
+
+def has_word(text, words):
+    """True if any word/phrase appears in text as a whole word (not a substring)."""
+    return any(re.search(r"\b" + re.escape(w) + r"\b", text) for w in words)
 
 
 class ChatAgent:
@@ -83,38 +95,44 @@ class ChatAgent:
         ml = message.lower()
 
         post_kw = [
-            "phd", "msc", "master", "research assistant", "teaching assistant",
-            "graduate", "fellowship", "scholarship", "position", "opening",
-            "apply", "deadline", "supervisor", "lab", "department",
+            "phd", "msc", "master", "masters", "master's", "research assistant",
+            "teaching assistant", "graduate", "fellowship", "scholarship",
+            "position", "positions", "opening", "openings", "apply", "deadline",
+            "supervisor", "lab", "department",
         ]
-        is_post = any(kw in ml for kw in post_kw) and len(message.split()) > 20
+        is_post = has_word(ml, post_kw) and len(message.split()) > 20
 
         if is_post:
             return self._process_post(message)
 
-        if any(w in ml for w in ["hello", "hi", "hey"]):
-            return self._handle_greeting()
-
-        if any(w in ml for w in ["help", "what can you do"]):
-            return self._handle_help()
-
-        if any(w in ml for w in ["cv", "resume", "profile", "my info", "status", "about me", "who am i"]):
-            return self._show_status()
-
-        if any(w in ml for w in ["my project", "my publication", "my skill", "my education", "my experience"]):
-            return self._show_detailed_profile(message)
-
-        if any(w in ml for w in ["write", "draft", "generate"]):
-            return self._handle_write()
-
-        if any(w in ml for w in ["send"]):
-            return self._handle_send()
-
-        if any(w in ml for w in ["setup email", "configure email", "smtp"]):
+        # Explicit commands first, so they aren't swallowed by broader keywords
+        if has_word(ml, ["setup email", "set up email", "configure email", "smtp"]):
             return self._handle_setup_email(message)
 
-        if any(w in ml for w in ["setup groq", "api key"]):
+        if re.search(r"\bemail\s*:", ml) and re.search(r"\bpassword\s*:", ml):
+            return self._handle_email_credentials(message)
+
+        if has_word(ml, ["setup groq", "set up groq", "api key"]):
             return self._handle_setup_groq(message)
+
+        if has_word(ml, ["my project", "my projects", "my publication", "my publications",
+                         "my skill", "my skills", "my education", "my experience"]):
+            return self._show_detailed_profile(message)
+
+        if has_word(ml, ["hello", "hi", "hey"]):
+            return self._handle_greeting()
+
+        if has_word(ml, ["help", "what can you do"]):
+            return self._handle_help()
+
+        if has_word(ml, ["cv", "resume", "profile", "my info", "status", "about me", "who am i"]):
+            return self._show_status()
+
+        if has_word(ml, ["write", "draft", "generate"]):
+            return self._handle_write()
+
+        if has_word(ml, ["send"]):
+            return self._handle_send()
 
         # If a post is loaded, treat as modification or question
         if self.current_post:
@@ -169,6 +187,7 @@ class ChatAgent:
             id="", title=post.title, institution=post.institution,
             content=post.content, post_type=post.post_type,
             deadline=post.deadline, requirements=post.requirements,
+            metadata=post.metadata or {},
         )
         self.rag_store.add_post(rag_post)
         return resp
@@ -200,55 +219,52 @@ class ChatAgent:
         return needs
 
     def _handle_cv_response(self, message):
-        if "upload" in message.lower() or "here" in message.lower():
-            return "Please use the file uploader below to send your CV (PDF, DOCX, or TXT)."
+        if has_word(message.lower(), ["upload", "here", "how"]) and len(message.split()) <= 8:
+            return "Use the uploader in the sidebar to send your CV (PDF, DOCX, or TXT)."
+        # Anything else (a new post, a command, a question) is handled normally
         self.flow_state = "idle"
-        return "Okay. Upload your CV anytime, or type 'write' to continue."
+        return self._handle_new_message(message)
 
     def _handle_send_response(self, message):
-        ml = message.lower()
+        ml = message.lower().strip()
 
-        if any(w in ml for w in ["yes", "send", "go", "sure"]):
-            if self.pending_email and self.email_sender.is_configured():
-                result = self.email_sender.send_email(
-                    to_email=self.pending_email.to_email,
-                    subject=self.pending_email.subject,
-                    body=self.pending_email.body,
-                    from_name=self.resources.name,
-                )
-                self.pending_email = None
-                self.flow_state = "idle"
-                self.current_post = None
-                if result["success"]:
-                    return f"**Email sent to {result['to']}!**\n\nSend another post anytime."
-                return f"**Failed:** {result['error']}\n\nCopy the email above and send manually."
-            self.flow_state = "idle"
-            return "Email not configured. Copy the email above and send it manually."
+        # Only a short, explicit confirmation sends. Longer messages are edit instructions,
+        # so "make it longer and go into detail" never sends by accident.
+        if len(ml.split()) <= 4 and has_word(ml, ["yes", "send", "send it", "sure", "go ahead"]) \
+                and not has_word(ml, ["no", "not", "don't", "dont"]):
+            return self._handle_send()
 
-        if any(w in ml for w in ["no", "cancel"]):
+        to_match = re.match(r"^\s*(?:to|recipient)\s*:?\s*(" + EMAIL_RE + r")\s*$", message, re.IGNORECASE)
+        if to_match and self.pending_email:
+            self.pending_email.to_email = to_match.group(1)
+            return (f"Recipient set to **{self.pending_email.to_email}**.\n\n"
+                    "Type **'send'** to send, or tell me what to change.")
+
+        if has_word(ml, ["no", "cancel", "discard"]) and len(ml.split()) <= 4:
+            self.pending_email = None
             self.flow_state = "idle"
             return "Cancelled. Paste a new post anytime."
 
-        if any(w in ml for w in ["edit", "change", "modify"]):
-            self.flow_state = "idle"
+        if ml in ["edit", "change", "modify", "edit it", "change it"]:
             return "What would you like me to change? Tell me specifically (e.g., 'make it shorter', 'add my publication about X')."
 
-        if any(w in ml for w in ["about me", "my info", "my profile", "who am i", "tell me about"]):
+        if has_word(ml, ["about me", "my info", "my profile", "who am i"]):
             return self._show_status()
 
-        if any(w in ml for w in ["what did you write", "show email", "what's in it", "summary"]):
+        if has_word(ml, ["what did you write", "show email", "show the email", "what's in it", "summary"]):
             if self.pending_email:
-                return (f"**To:** {self.pending_email.to_email}\n"
+                return (f"**To:** {self.pending_email.to_email or '(not set)'}\n"
                         f"**Subject:** {self.pending_email.subject}\n\n"
-                        "Type **'send'** to send, **'edit'** to modify.")
+                        f"{self.pending_email.body}\n\n---\n\n"
+                        "Type **'send'** to send, or tell me what to change.")
             return "No email ready."
 
-        if any(w in ml for w in ["help", "what can"]):
+        if has_word(ml, ["help", "what can"]):
             return ("**Options:**\n"
                     "- `send` — send the email\n"
-                    "- `edit` — tell me what to change\n"
+                    "- `to: someone@uni.edu` — set the recipient\n"
                     "- `cancel` — discard\n"
-                    "- Ask me anything about the email")
+                    "- Anything else is treated as an edit (e.g. 'make it shorter')")
 
         # Default: treat as modification request
         if self.pending_email:
@@ -269,10 +285,19 @@ Current email:
 
 Instruction: {instruction}
 
-Return the edited email. Keep it concise and professional."""
+Applicant background (the only source of facts):
+{self.resources.to_context_string()}
+
+Rules:
+- Apply the instruction and keep everything else as it is.
+- {NO_FABRICATION_RULE}
+- Don't open with "I am writing to express".
+- Return ONLY the email body (greeting to sign-off). No subject line, no explanations."""
 
         try:
             edited = self.llm.generate(prompt, use_groq=True)
+            if not edited.strip() or edited == "No LLM available.":
+                return "No LLM available to edit the email. Start Ollama or add a Groq key (`setup groq KEY`)."
             self.pending_email.body = edited
             return (f"**Updated email:**\n\n{edited}\n\n---\n\n"
                     "Type **'send'** to send, **'edit'** to change more.")
@@ -288,11 +313,14 @@ Return the edited email. Keep it concise and professional."""
 
     def _process_cv_upload(self, filename, file_bytes, file_type):
         try:
-            temp_path = RESOURCES_DIR / f"temp_cv.{file_type}"
-            temp_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path.write_bytes(file_bytes)
-            extracted = self.cv_extractor.extract_from_file(temp_path)
-            temp_path.unlink(missing_ok=True)
+            # Keep the CV as resources/cv.<ext> so it can be attached when sending
+            RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+            for ext in CV_EXTENSIONS:
+                (RESOURCES_DIR / f"cv.{ext}").unlink(missing_ok=True)
+            cv_path = RESOURCES_DIR / f"cv.{file_type}"
+            cv_path.write_bytes(file_bytes)
+            extracted = self.cv_extractor.extract_from_file(cv_path)
+            self.resources.cv_text = extracted.raw_text
 
             if extracted.name:
                 self.resources.name = extracted.name
@@ -363,7 +391,14 @@ Return the edited email. Keep it concise and professional."""
             metadata=self.current_post.get("metadata", {}),
         )
 
-        generated = self.writer.write_scholarship_application(post_obj, clarification or None)
+        generated = self.writer.write_scholarship_application(
+            post_obj, clarification or None, cv_attached=self._cv_file() is not None
+        )
+        if generated.error:
+            return (f"**Couldn't generate the email:** {generated.error}\n\n"
+                    "Check that Ollama is running with the configured model, or that your Groq key "
+                    "and model in `config/llm_config.json` are valid. Then type **'write'** again.")
+
         self.pending_email = generated
         self.flow_state = "waiting_send"
 
@@ -393,31 +428,71 @@ Return the edited email. Keep it concise and professional."""
         if not self.email_sender.is_configured():
             return ("Email not configured. Type **'setup email gmail'** to set up.\n\n"
                     "Or copy the email above and send manually.")
+        if not self.pending_email.to_email:
+            return ("The post didn't include a recipient address.\n\n"
+                    "Type `to: professor@university.edu` to set one, then **'send'**.")
+        cv_file = self._cv_file()
         result = self.email_sender.send_email(
             to_email=self.pending_email.to_email,
             subject=self.pending_email.subject,
             body=self.pending_email.body,
             from_name=self.resources.name,
+            attachments=[cv_file] if cv_file else None,
         )
+        if not result["success"]:
+            # Keep the draft so the user can fix the problem and retry
+            return f"**Failed:** {result['error']}\n\nFix the issue and type **'send'** again, or copy the email and send manually."
         self.pending_email = None
         self.flow_state = "idle"
         self.current_post = None
-        if result["success"]:
-            return f"**Email sent to {result['to']}!**"
-        return f"**Failed:** {result['error']}"
+        attached = " (CV attached)" if cv_file else ""
+        return f"**Email sent to {result['to']}!**{attached}\n\nPaste another post anytime."
+
+    def _cv_file(self):
+        for ext in CV_EXTENSIONS:
+            path = RESOURCES_DIR / f"cv.{ext}"
+            if path.exists():
+                return path
+        return None
 
     def _handle_setup_email(self, message):
         ml = message.lower()
-        if "gmail" in ml:
-            server, port = "smtp.gmail.com", 587
-        elif "outlook" in ml:
-            server, port = "smtp-mail.outlook.com", 587
-        else:
-            return "Which provider? Type 'setup email gmail', 'outlook', or 'yahoo'."
+        provider = next((p for p in SMTP_PROVIDERS if p in ml), None)
+        if not provider:
+            return "Which provider? Type 'setup email gmail', 'setup email outlook', or 'setup email yahoo'."
 
+        self.context["smtp_provider"] = provider
+        server, _ = SMTP_PROVIDERS[provider]
         return (f"**Configure {server}**\n\n"
                 "Type: `email: your@email.com password: your-app-password`\n\n"
-                "_Gmail: use App Password from https://myaccount.google.com/apppasswords_")
+                "_Gmail: use an App Password from https://myaccount.google.com/apppasswords_\n\n"
+                "_Credentials are stored locally in `config/email_config.json` (gitignored)._")
+
+    def _handle_email_credentials(self, message):
+        email_match = re.search(r"email\s*:\s*(" + EMAIL_RE + r")", message, re.IGNORECASE)
+        pw_match = re.search(r"password\s*:\s*(.+?)\s*$", message, re.IGNORECASE)
+        if not email_match or not pw_match:
+            return "Format: `email: your@email.com password: your-app-password`"
+
+        address = email_match.group(1)
+        provider = self.context.get("smtp_provider") or next(
+            (p for p in SMTP_PROVIDERS if p in address.lower()), None)
+        if not provider:
+            return "Which provider? Type 'setup email gmail', 'outlook', or 'yahoo' first."
+
+        server, port = SMTP_PROVIDERS[provider]
+        config = EmailConfig(
+            smtp_server=server, smtp_port=port, email_address=address,
+            password=pw_match.group(1).replace(" ", ""), use_tls=True,
+        )
+        sender = EmailSender(config)
+        test = sender.test_connection()
+        if not test["success"]:
+            return f"**Couldn't log in:** {test['error']}\n\nCheck the address and app password and try again."
+
+        config.save()
+        self.email_sender = sender
+        return f"**Email configured** ({address} via {server}). You can now type **'send'** on a drafted email."
 
     def _handle_setup_groq(self, message):
         match = re.search(r"setup\s+groq\s+(\S+)", message)

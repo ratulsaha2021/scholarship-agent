@@ -41,3 +41,10 @@ models/
 
 # Logs
 *.log
+resources/cv.txt
+resources/temp_cv.*
+
+# Local agent tooling (symlinks into .venv, worktrees)
+.agents/
+.claude/
+.kilo/

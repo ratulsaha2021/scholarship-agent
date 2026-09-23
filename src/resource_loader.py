@@ -59,6 +59,11 @@ class UserResources:
             resources.publications = data.get("publications", [])
             resources.awards = data.get("awards", [])
             resources.target_universities = data.get("target_universities", [])
+            # The chat agent saves these to user_data.json; the .txt files take precedence
+            if not resources.skills:
+                resources.skills = data.get("skills", [])
+            if not resources.research_interests:
+                resources.research_interests = data.get("research_interests", [])
         
         return resources
     

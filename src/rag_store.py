@@ -113,7 +113,8 @@ class RAGStore:
                     post_type=item.get("post_type", ""),
                     url=item.get("url", ""),
                     deadline=item.get("deadline", ""),
-                    requirements=item.get("requirements", "")
+                    requirements=item.get("requirements", ""),
+                    metadata=item.get("metadata", {})
                 )
                 self.posts.append(post)
             if self.posts:

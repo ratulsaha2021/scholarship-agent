@@ -2,6 +2,13 @@
 
 import os
 import json
+
+# Appended to every prompt that writes or rewrites an application email
+NO_FABRICATION_RULE = (
+    "Use ONLY facts stated in the applicant's background or the original text. "
+    "Never invent projects, employers, results, numbers, papers or skills. "
+    "If a detail isn't given, leave it out."
+)
 from pathlib import Path
 from typing import Optional, Dict, List
 from dataclasses import dataclass
@@ -14,7 +21,7 @@ class LLMConfig:
     
     # Groq API
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
     
     @classmethod
     def load(cls) -> "LLMConfig":
@@ -22,7 +29,10 @@ class LLMConfig:
         if config_file.exists():
             with open(config_file, "r") as f:
                 data = json.load(f)
-            return cls(**data)
+            config = cls(**data)
+            if not config.groq_api_key:
+                config.groq_api_key = os.environ.get("GROQ_API_KEY", "")
+            return config
         
         config = cls()
         config.groq_api_key = os.environ.get("GROQ_API_KEY", "")
@@ -141,7 +151,9 @@ class HybridLLM:
             "ai_analysis": {},
             "humanized": "",
             "local_used": False,
-            "groq_used": False
+            "groq_used": False,
+            "fallback": False,
+            "error": ""
         }
         
         # Step 1: Local Llama drafts email
@@ -155,8 +167,9 @@ Rules:
 - Vary sentence length
 - Be specific, not generic
 - No "I am writing to express..." openings
-- Reference specific papers/projects when possible
-- Keep under 300 words"""
+- Reference specific papers/projects from the background when relevant
+- Keep under 300 words
+- {NO_FABRICATION_RULE}"""
         
         try:
             if self._check_local_available():
@@ -166,8 +179,17 @@ Rules:
                 result["draft"] = self._call_groq(prompt, draft_system)
             else:
                 result["draft"] = self._fallback_draft(prompt)
+                result["fallback"] = True
+                result["error"] = "No LLM available (Ollama model not found and no Groq key)."
         except Exception as e:
             result["draft"] = self._fallback_draft(prompt)
+            result["fallback"] = True
+            result["error"] = str(e)
+
+        if result["fallback"]:
+            # Don't run the template through the rest of the pipeline
+            result["humanized"] = result["draft"]
+            return result
         
         # Step 2: Local Llama checks AI patterns
         check_prompt = f"""Analyze this email for AI writing patterns. Return JSON with:
@@ -225,11 +247,10 @@ Rewrite rules:
 1. Add contractions (I'm, don't, can't, won't)
 2. Vary sentence lengths (mix short and long)
 3. Use casual transitions (Also, But, So, Plus)
-4. Add specific details/examples
-5. Include natural imperfections
-6. Sound like a real person, not a template
-7. Keep the core message but make it flow naturally
-8. Remove any remaining AI-sounding phrases
+4. Sound like a real person, not a template
+5. Keep the core message and every fact exactly as given
+6. Remove any remaining AI-sounding phrases
+7. Do NOT add any new facts, projects, numbers or claims. {NO_FABRICATION_RULE}
 
 Return ONLY the rewritten email text, no explanations."""
         
@@ -301,6 +322,7 @@ Issues found:
 Suggestions:
 {json.dumps(suggestions, indent=2)}
 
+Do NOT add new facts. {NO_FABRICATION_RULE}
 Return ONLY the rewritten email text, no explanations."""
         
         system = """You are an expert at making AI-generated text sound human."""

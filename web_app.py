@@ -1,7 +1,6 @@
 """Minimalistic web UI for Scholarship Agent."""
 
 import streamlit as st
-from pathlib import Path
 
 from src.chat_agent import ChatAgent
 
@@ -18,16 +17,14 @@ CUSTOM_CSS = """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
-@st.cache_resource
-def load_agent():
-    return ChatAgent()
-
-
 def init():
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "agent" not in st.session_state:
-        st.session_state.agent = load_agent()
+        # One agent per browser session: it holds conversation state (current post, draft)
+        st.session_state.agent = ChatAgent()
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
 
 
 def sidebar():
@@ -37,7 +34,7 @@ def sidebar():
 
         if st.button("New Chat", use_container_width=True):
             st.session_state.messages = []
-            st.session_state.agent = load_agent()
+            st.session_state.agent = ChatAgent()
             st.rerun()
 
         st.divider()
@@ -54,6 +51,7 @@ def sidebar():
             "Upload CV or Image",
             type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
             label_visibility="collapsed",
+            key=f"uploader_{st.session_state.uploader_key}",
         )
 
         if uploaded:
@@ -63,6 +61,8 @@ def sidebar():
                     uploaded.name, uploaded.read(), ext
                 )
             st.session_state.messages.append({"role": "assistant", "content": resp})
+            # Reset the uploader, otherwise the same file is processed again on every rerun
+            st.session_state.uploader_key += 1
             st.rerun()
 
 
