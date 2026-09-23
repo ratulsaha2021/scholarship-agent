@@ -113,7 +113,7 @@ STRICT RULES:
 2. Do NOT repeat any phrase or idea. Every sentence must say something NEW.
 3. Start with "Dear Dr. [Last Name]," or "Dear Professor [Last Name],"
 4. First sentence: state the specific position and one reason you're interested
-5. Second paragraph: ONE specific project/skill that matches their research
+5. Second paragraph: ONE real project, paper or skill from my background that best relates to their research. Describe only what the background actually says; if it is only a job title, mention the title without inventing duties. Never claim experience the background does not show.
 6. Final sentence: {closing_rule}
 7. Sign off with "Best regards," then name
 8. Do NOT use: "I am writing to express", "I believe", "I think", "Furthermore", "Moreover"

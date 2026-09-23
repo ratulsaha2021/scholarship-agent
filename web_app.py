@@ -17,6 +17,11 @@ CUSTOM_CSS = """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
+def md(text):
+    """Keep single line breaks (Markdown would otherwise join the lines)."""
+    return text.replace("\n", "  \n")
+
+
 def init():
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -75,17 +80,17 @@ def main():
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            st.markdown(md(msg["content"]))
 
     if prompt := st.chat_input("Paste a post or ask me anything..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(md(prompt))
 
         with st.chat_message("assistant"):
             with st.spinner("..."):
                 resp = st.session_state.agent.chat(prompt)
-            st.markdown(resp)
+            st.markdown(md(resp))
 
         st.session_state.messages.append({"role": "assistant", "content": resp})
 
