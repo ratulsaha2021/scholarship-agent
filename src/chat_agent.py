@@ -152,7 +152,9 @@ class ChatAgent:
         try:
             title, text = extract_main_text(self.fetcher.fetch(url))
         except FetchError as e:
-            return f"**Couldn't read that page:** {e}"
+            return (f"**Couldn't read that page:** {e}\n\n"
+                    "Instead, copy the post text and paste it here, or upload a screenshot of it "
+                    "in the sidebar (LinkedIn, FindAPhD and similar sites don't allow automated access).")
         if len(text.split()) < 30:
             return ("That page has very little readable text (it may need JavaScript or a login).\n\n"
                     "Copy the post text and paste it here instead.")

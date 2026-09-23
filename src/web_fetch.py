@@ -123,7 +123,7 @@ class PoliteFetcher:
         except requests.RequestException as e:
             raise FetchError(f"Couldn't reach {parsed.netloc}: {e}")
         if resp.status_code == 403:
-            raise FetchError(f"{parsed.netloc} blocked the request (403). Copy the post text and paste it instead.")
+            raise FetchError(f"{parsed.netloc} blocked the request (403).")
         if resp.status_code != 200:
             raise FetchError(f"{parsed.netloc} returned HTTP {resp.status_code}.")
 
