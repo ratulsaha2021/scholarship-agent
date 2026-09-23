@@ -1,15 +1,9 @@
 """Discovery module - finds scholarship and professor opportunities."""
 
 import json
-import time
-import re
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-from urllib.parse import urlparse
-
-import requests
-from bs4 import BeautifulSoup
 
 RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 
@@ -41,10 +35,6 @@ class OpportunityDiscovery:
     
     def __init__(self, delay: float = 2.0):
         self.delay = delay
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
     
     def load_manual_targets(self, targets_file: Optional[Path] = None) -> List[Opportunity]:
         """Load manually specified targets from JSON file."""
@@ -73,107 +63,23 @@ class OpportunityDiscovery:
         
         return opportunities
     
-    def search_academic_positions(self, query: str, max_results: int = 10) -> List[Opportunity]:
-        """Search for academic positions online."""
-        opportunities = []
-        
-        try:
-            search_url = f"https://scholarshipdb.net/scholarships?q={query}"
-            time.sleep(self.delay)
-            
-            response = self.session.get(search_url, timeout=10)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, "html.parser")
-                results = soup.find_all("div", class_="scholarship-item")[:max_results]
-                
-                for result in results:
-                    title_elem = result.find("h3") or result.find("h4")
-                    link_elem = result.find("a")
-                    
-                    if title_elem and link_elem:
-                        opp = Opportunity(
-                            type="scholarship",
-                            title=title_elem.get_text(strip=True),
-                            institution=self._extract_institution(result),
-                            url=link_elem.get("href", ""),
-                            description=self._extract_description(result),
-                            deadline=self._extract_deadline(result)
-                        )
-                        opportunities.append(opp)
-        except Exception as e:
+    def search_academic_positions(self, query: str, max_results: int = 10, profile: str = "") -> List[Opportunity]:
+        """Search EURAXESS and jobs.ac.uk (sites whose robots.txt allows it), best match first."""
+        from .sources import find_opportunities
+        from .web_fetch import PoliteFetcher
+
+        listings, errors = find_opportunities(query, profile, PoliteFetcher(delay=self.delay))
+        for e in errors:
             print(f"Search error: {e}")
-        
-        return opportunities
-    
-    def find_professor_emails(self, department_url: str) -> List[Dict]:
-        """Find professor emails from a department page."""
-        professors = []
-        
-        try:
-            time.sleep(self.delay)
-            response = self.session.get(department_url, timeout=10)
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, "html.parser")
-                
-                email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
-                emails = set(email_pattern.findall(response.text))
-                
-                for email in emails:
-                    if not any(x in email.lower() for x in ["noreply", "support", "admin", "webmaster"]):
-                        professors.append({
-                            "email": email,
-                            "department_url": department_url
-                        })
-        except Exception as e:
-            print(f"Error fetching professor emails: {e}")
-        
-        return professors
-    
-    def search_research_gate(self, query: str) -> List[Opportunity]:
-        """Search ResearchGate for opportunities."""
-        opportunities = []
-        
-        try:
-            time.sleep(self.delay)
-            search_url = f"https://www.researchgate.net/search?q={query}%20PhD%20position"
-            response = self.session.get(search_url, timeout=10)
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, "html.parser")
-                results = soup.find_all("li", class_="nova-legacy-elevated-card")[:5]
-                
-                for result in results:
-                    title_elem = result.find("h2")
-                    if title_elem:
-                        opp = Opportunity(
-                            type="phd_position",
-                            title=title_elem.get_text(strip=True),
-                            institution="",
-                            url="https://www.researchgate.net" + (title_elem.find("a") or {}).get("href", ""),
-                            description=self._extract_description(result)
-                        )
-                        opportunities.append(opp)
-        except Exception as e:
-            print(f"ResearchGate search error: {e}")
-        
-        return opportunities
-    
-    def _extract_institution(self, element) -> str:
-        """Extract institution name from HTML element."""
-        inst_elem = element.find(class_="institution") or element.find("span", class_="uni")
-        return inst_elem.get_text(strip=True) if inst_elem else ""
-    
-    def _extract_description(self, element) -> str:
-        """Extract description from HTML element."""
-        desc_elem = element.find("p") or element.find("div", class_="description")
-        return desc_elem.get_text(strip=True)[:500] if desc_elem else ""
-    
-    def _extract_deadline(self, element) -> str:
-        """Extract deadline from HTML element."""
-        deadline_elem = element.find(class_="deadline") or element.find("span", string=re.compile(r"deadline|due|close", re.I))
-        return deadline_elem.get_text(strip=True) if deadline_elem else ""
-    
+        return [
+            Opportunity(
+                type="phd_position" if "phd" in l.title.lower() else "scholarship",
+                title=l.title, institution=l.institution, url=l.url,
+                description=l.snippet, deadline=l.deadline,
+            )
+            for l in listings[:max_results]
+        ]
+
     def save_opportunities(self, opportunities: List[Opportunity], filename: str = "discovered_opportunities.json"):
         """Save discovered opportunities to file."""
         output_file = RESOURCES_DIR / filename

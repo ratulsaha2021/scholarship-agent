@@ -15,9 +15,15 @@ from .rag_store import RAGStore, ApplicationPost, PostProcessor
 from .ocr_processor import OCRProcessor
 from .email_sender import EmailSender, EmailConfig
 from .hybrid_llm import HybridLLM, LLMConfig, NO_FABRICATION_RULE
+from .web_fetch import PoliteFetcher, FetchError, extract_main_text
+from .sources import Listing, find_opportunities, profile_text
+from .digest import WatchList, run_digest
 
 RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 CV_EXTENSIONS = ["pdf", "docx", "txt"]
+URL_RE = r"https?://[^\s<>\"')\]]+"
+FIND_RE = r"^\s*(?:find|search(?:\s+for)?|look\s+for)\s+(.+?)\s*$"
+PICK_RE = r"^\s*(?:apply|open|pick|use)\s*(?:to|for)?\s*(?:#|no\.?|number)?\s*(\d+)\s*$"
 EMAIL_RE = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 SMTP_PROVIDERS = {
     "gmail": ("smtp.gmail.com", 587),
@@ -48,6 +54,9 @@ class ChatAgent:
         self.pending_email = None
         self.flow_state = "idle"
         self.context = {}
+        self.fetcher = PoliteFetcher(delay=self.config.discovery.delay_between_requests)
+        self.watch = WatchList()
+        self.search_results = []
 
     def _load_persistent_resources(self):
         return UserResources.load(RESOURCES_DIR)
@@ -72,6 +81,10 @@ class ChatAgent:
     def chat(self, user_message):
         self.conversation_history.append({"role": "user", "content": user_message})
 
+        if self.flow_state != "idle" and self._is_web_command(user_message):
+            # A link, search or pick always starts fresh, whatever we were waiting for
+            self.flow_state = "idle"
+
         if self.flow_state == "waiting_cv":
             response = self._handle_cv_response(user_message)
         elif self.flow_state == "waiting_send":
@@ -91,8 +104,118 @@ class ChatAgent:
             return self._process_image_upload(filename, file_bytes)
         return f"Unsupported file type: {file_type}"
 
+    def _is_web_command(self, message):
+        return bool(
+            (re.search(URL_RE, message) and len(message.split()) <= 3)
+            or re.match(FIND_RE, message, re.IGNORECASE)
+            or re.match(PICK_RE, message, re.IGNORECASE)
+            or re.match(r"^\s*(?:un)?watch\b", message, re.IGNORECASE)
+            or message.lower().strip() in ["digest", "what's new", "whats new", "watches", "watching"]
+        )
+
+    def _handle_web_command(self, message):
+        ml = message.lower().strip()
+        url = re.search(URL_RE, message)
+        if url and len(message.split()) <= 3:
+            return self._process_url(url.group(0))
+
+        m = re.match(FIND_RE, message, re.IGNORECASE)
+        if m:
+            return self._handle_find(m.group(1))
+
+        m = re.match(PICK_RE, message, re.IGNORECASE)
+        if m:
+            return self._handle_pick(int(m.group(1)))
+
+        m = re.match(r"^\s*unwatch\s+(.+?)\s*$", message, re.IGNORECASE)
+        if m:
+            if self.watch.remove_query(m.group(1)):
+                return f"Stopped watching **{m.group(1)}**."
+            return f"I wasn't watching '{m.group(1)}'. Type `watches` to see the list."
+
+        m = re.match(r"^\s*watch\s+(.+?)\s*$", message, re.IGNORECASE)
+        if m:
+            query = m.group(1)
+            added = self.watch.add_query(query)
+            return ((f"Watching **{query}**. " if added else f"Already watching **{query}**. ")
+                    + "Type `digest` any time to see new matches, or schedule "
+                    "`uv run python -m src.digest` to collect them daily.")
+
+        if ml in ["watches", "watching"]:
+            if not self.watch.queries:
+                return "No watched searches. Type e.g. `watch machine learning phd`."
+            return "**Watching:**\n" + "\n".join(f"- {q}" for q in self.watch.queries)
+
+        return self._handle_digest()
+
+    def _process_url(self, url, listing=None):
+        try:
+            title, text = extract_main_text(self.fetcher.fetch(url))
+        except FetchError as e:
+            return f"**Couldn't read that page:** {e}"
+        if len(text.split()) < 30:
+            return ("That page has very little readable text (it may need JavaScript or a login).\n\n"
+                    "Copy the post text and paste it here instead.")
+
+        overrides = {}
+        if listing:
+            overrides = {"title": listing.title, "institution": listing.institution,
+                         "deadline": listing.deadline}
+        # Title first so it's picked up as the post title; source kept for the record
+        post_text = f"{overrides.get('title') or title}\n{text}\n\nSource: {url}"
+        return self._process_post(post_text, overrides=overrides, source_url=url)
+
+    def _handle_find(self, query):
+        results, errors = find_opportunities(query, profile_text(self.resources), self.fetcher)
+        self.search_results = results[:10]
+        if not self.search_results:
+            resp = f"No listings found for **{query}**."
+        else:
+            resp = self._format_listings(self.search_results, f"Top matches for **{query}**")
+            self.watch.mark_seen(self.search_results)
+        if errors:
+            resp += "\n\n_Some sources failed:_\n" + "\n".join(f"- {e}" for e in errors)
+        return resp
+
+    def _format_listings(self, listings, heading):
+        lines = [f"{heading} (ranked against your profile):", ""]
+        for i, l in enumerate(listings, 1):
+            new = " · _new_" if self.watch.is_new(l) else ""
+            details = " · ".join(p for p in [l.institution, l.deadline] if p)
+            lines.append(f"{i}. **{l.title}**{new}  \n   {details} · [{l.source}]({l.url})")
+        lines += ["", "Type `apply N` to load one and draft the email."]
+        return "\n".join(lines)
+
+    def _handle_pick(self, n):
+        if not self.search_results:
+            return "No search results yet. Try `find machine learning phd`."
+        if not 1 <= n <= len(self.search_results):
+            return f"Pick a number from 1 to {len(self.search_results)}."
+        listing = self.search_results[n - 1]
+        return self._process_url(listing.url, listing=listing)
+
+    def _handle_digest(self):
+        listings = self.watch.take_inbox()
+        errors = []
+        if not listings:
+            if not self.watch.queries:
+                return "No watched searches. Type e.g. `watch machine learning phd`."
+            listings, errors = run_digest(self.watch, profile_text(self.resources), self.fetcher)
+            self.watch.mark_seen(listings)
+        if not listings:
+            resp = "Nothing new for your watched searches since the last check."
+        else:
+            self.search_results = listings[:10]
+            resp = self._format_listings(self.search_results, f"**{len(listings)} new** listing(s)")
+        if errors:
+            resp += "\n\n_Some sources failed:_\n" + "\n".join(f"- {e}" for e in errors)
+        return resp
+
     def _handle_new_message(self, message):
         ml = message.lower()
+
+        if self._is_web_command(message):
+            return self._handle_web_command(message)
 
         post_kw = [
             "phd", "msc", "master", "masters", "master's", "research assistant",
@@ -138,11 +261,17 @@ class ChatAgent:
         if self.current_post:
             return self._handle_post_question(message)
 
-        return ("Paste a scholarship/position announcement, or upload a screenshot.\n\n"
+        return ("Paste a scholarship/position announcement or a link to one, upload a screenshot, "
+                "or search with `find machine learning phd`.\n\n"
                 "I'll parse it and guide you through the application.")
 
-    def _process_post(self, text):
+    def _process_post(self, text, overrides=None, source_url=""):
         post = self.post_processor.process_text(text)
+        for field_name, value in (overrides or {}).items():
+            if value:
+                setattr(post, field_name, value)
+        if source_url:
+            post.url = source_url
 
         self.current_post = {
             "title": post.title,
@@ -157,6 +286,8 @@ class ChatAgent:
         has_cv = bool(self.resources.name and self.resources.email)
 
         resp = f"**Found: {post.title}**\n"
+        if source_url:
+            resp += f"**Link:** {source_url}\n"
         if post.institution:
             resp += f"**Institution:** {post.institution}\n"
         if post.deadline:
@@ -187,7 +318,7 @@ class ChatAgent:
             id="", title=post.title, institution=post.institution,
             content=post.content, post_type=post.post_type,
             deadline=post.deadline, requirements=post.requirements,
-            metadata=post.metadata or {},
+            url=post.url, metadata=post.metadata or {},
         )
         self.rag_store.add_post(rag_post)
         return resp
@@ -522,12 +653,14 @@ Rules:
             models.append("Groq")
         if models:
             resp += f"_Models: {', '.join(models)}_"
+        if self.watch.inbox:
+            resp += f"\n\n**{len(self.watch.inbox)} new listing(s)** from your watched searches. Type `digest` to see them."
 
         return resp
 
     def _handle_help(self):
         return ("**How it works:**\n\n"
-                "1. Paste a post (text or screenshot)\n"
+                "1. Paste a post (text, screenshot or link), or search with `find ...`\n"
                 "2. Upload your CV if needed\n"
                 "3. I write the email\n"
                 "4. You send it\n\n"
@@ -535,6 +668,11 @@ Rules:
                 "- `status` — show your profile\n"
                 "- `setup email gmail` — configure sending\n"
                 "- `setup groq KEY` — add Groq API\n"
+                "- `find machine learning phd` — search EURAXESS + jobs.ac.uk\n"
+                "- `apply 3` — load result 3 from the last search\n"
+                "- paste a link — read a post straight from its web page\n"
+                "- `watch QUERY` / `unwatch QUERY` / `watches` — saved searches\n"
+                "- `digest` — new listings for your saved searches\n"
                 "- `write` — generate email for loaded post\n"
                 "- `send` — send the drafted email")
 

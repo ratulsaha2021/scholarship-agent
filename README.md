@@ -2,12 +2,13 @@
 
 A chat assistant that turns a scholarship/PhD position post into a personalised, human-sounding application email, and can send it for you.
 
-Paste a post (or upload a screenshot), and the agent:
+Paste a post, a link to one, or a screenshot, or search job sites from the chat, and the agent:
 
-1. Parses the title, institution, deadline, contact email and any required subject line
-2. Uses your CV/profile to draft a short, specific email (no invented facts)
-3. Lets you edit it in plain language ("make it shorter", "mention my TB paper")
-4. Sends it over SMTP with your CV attached, only after you explicitly confirm
+1. Finds openings on EURAXESS and jobs.ac.uk, ranked against your profile (optional)
+2. Parses the title, institution, deadline, contact email and any required subject line
+3. Uses your CV/profile to draft a short, specific email (no invented facts)
+4. Lets you edit it in plain language ("make it shorter", "mention my TB paper")
+5. Sends it over SMTP with your CV attached, only after you explicitly confirm
 
 ## How it works
 
@@ -77,13 +78,18 @@ Open http://localhost:8501.
 ## Using the chat
 
 1. **Upload your CV** (PDF/DOCX/TXT) from the sidebar. It's parsed into `resources/user_data.json` and kept as `resources/cv.<ext>` so it can be attached to emails.
-2. **Paste a post** (at least ~20 words), or upload a screenshot of one.
+2. **Load a post**: paste its text (at least ~20 words) or its link, upload a screenshot, or search (`find machine learning phd`, then `apply 3`).
 3. Type **`write`** to draft the email.
 4. Refine it: anything you type is treated as an edit instruction.
 5. Type **`send`** to send.
 
 | Command | What it does |
 |---------|--------------|
+| `find machine learning phd` | Search EURAXESS + jobs.ac.uk (+ your `targets.json` pages), ranked against your profile |
+| `apply 3` | Load result 3 from the last search as the current post |
+| *a link* | Read a post straight from its web page |
+| `watch QUERY` / `unwatch QUERY` / `watches` | Manage saved searches |
+| `digest` | Show listings for your saved searches that you haven't seen yet |
 | `write` | Draft an email for the loaded post |
 | `send` / `yes` | Send the drafted email (short, explicit confirmations only) |
 | `to: prof@uni.edu` | Set the recipient if the post didn't include one |
@@ -95,6 +101,36 @@ Open http://localhost:8501.
 | `setup groq KEY` | Save a Groq API key |
 
 For Gmail, use an [App Password](https://myaccount.google.com/apppasswords), not your normal password. Credentials are stored in `config/email_config.json` (gitignored).
+
+## Web search
+
+Search only uses sites whose `robots.txt` allows automated access:
+
+| Source | What it covers |
+|--------|----------------|
+| [EURAXESS](https://euraxess.ec.europa.eu/jobs/search) | EU research jobs, PhD and postdoc positions |
+| [jobs.ac.uk](https://www.jobs.ac.uk) | UK academic jobs and PhD studentships |
+| `resources/targets.json` | Lab/department pages you list yourself, included when they mention your search terms |
+
+FindAPhD, ScholarshipDb, AcademicPositions and ResearchGate block automated requests (HTTP 403), so they aren't used. For posts on those sites, copy the text and paste it.
+
+Fetching is deliberately polite (`src/web_fetch.py`):
+- Checks `robots.txt` before every request.
+- Waits at least 2 s between requests to the same site (`discovery.delay_between_requests` in `config/settings.json`).
+- Caches pages for 6 hours in `data/cache/`.
+- Identifies itself with an honest `ScholarAgent` user-agent.
+
+To add a site, create `src/sources/<site>.py` with `NAME`, `search_url(query)` and `parse(html) -> List[Listing]`, then add it to `SEARCH_SOURCES` in `src/sources/__init__.py`.
+
+### Daily digest
+
+Saved searches (`watch ...`) live in `data/watch.json`. To collect new matches on a schedule, add a cron job (`crontab -e`):
+
+```cron
+0 8 * * * cd /path/to/scholarship-agent && ~/.local/bin/uv run python -m src.digest >> data/digest.log 2>&1
+```
+
+New listings are queued, and the chat mentions them when you say hi. Type `digest` to see them. Nothing is ever emailed automatically: every email still goes through `write`, your review, and an explicit `send`.
 
 ## CLI mode (legacy)
 
@@ -124,14 +160,17 @@ scholarship-agent/
 │   ├── ocr_processor.py    # Screenshot OCR (tesseract)
 │   ├── email_sender.py     # SMTP sending with attachments
 │   ├── resource_loader.py  # Loads the user profile from resources/
-│   ├── discovery.py        # Target loading / scraping (CLI)
+│   ├── web_fetch.py        # Polite fetching: robots.txt, rate limit, cache, text extraction
+│   ├── sources/            # EURAXESS, jobs.ac.uk parsers + ranking
+│   ├── digest.py           # Saved searches and new-listing digest (cron entry point)
+│   ├── discovery.py        # Target loading / search (CLI)
 │   ├── agent.py            # CLI entry point
 │   └── config.py           # config/settings.json loader
 ├── config/
 │   ├── settings.json       # Humanisation/discovery settings
 │   └── ai_patterns.json    # AI-writing patterns to avoid
 ├── resources/              # Your CV and profile (gitignored)
-├── data/                   # Saved posts (gitignored)
+├── data/                   # Saved posts, page cache, watches (gitignored)
 └── tests/                  # pytest suite
 ```
 

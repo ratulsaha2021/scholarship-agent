@@ -16,6 +16,7 @@ from .resource_loader import UserResources, create_sample_resources
 from .humanizer import Humanizer
 from .discovery import OpportunityDiscovery, Opportunity, create_sample_targets
 from .writer import EmailWriter, GeneratedEmail
+from .sources import profile_text
 
 console = Console()
 
@@ -91,7 +92,9 @@ class ScholarshipAgent:
         
         if self.config.discovery.scrape_enabled and query:
             with console.status("[green]Searching online...[/green]"):
-                online_results = self.discovery.search_academic_positions(query)
+                online_results = self.discovery.search_academic_positions(
+                    query, self.config.discovery.max_results_per_search, profile_text(self.resources)
+                )
                 all_opportunities.extend(online_results)
                 console.print(f"[dim]Found {len(online_results)} online results[/dim]")
         

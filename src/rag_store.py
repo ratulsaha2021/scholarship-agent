@@ -238,7 +238,7 @@ class PostProcessor:
                 break
         
         deadline = ""
-        deadline_match = re.search(r'(?:deadline|due|close|apply by)[:\s]*(.*?)(?:\n|$)', text, re.IGNORECASE)
+        deadline_match = re.search(r'\b(?:application deadline|deadline|closing date|closes|apply by)\b[:\s]*(.+?)(?:\n|$)', text, re.IGNORECASE)
         if deadline_match:
             deadline = deadline_match.group(1).strip()
         
@@ -254,12 +254,12 @@ class PostProcessor:
         # Extract subject format - try multiple patterns
         subject_format = ""
         # Pattern 1: "Email subject:" followed by content
-        subject_match = re.search(r'(?i)email\s+subject[:\s]*\n?\s*(.+?)(?:\n\n|\n(?=[A-Z\[])|\Z)', text, re.DOTALL)
+        subject_match = re.search(r'(?i)\bemail\s+subject(?:\s+line)?\s*:\s*\n?\s*(.+?)(?:\n\n|\n(?=[A-Z\[])|\Z)', text, re.DOTALL)
         if subject_match:
             subject_format = subject_match.group(1).strip()
         # Pattern 2: "Subject:" line
         if not subject_format:
-            subject_match = re.search(r'(?i)subject[:\s]+(.+?)(?:\n|$)', text)
+            subject_match = re.search(r'(?i)\b(?:email\s+)?subject(?:\s+line)?\s*:\s*(.+?)(?:\n|$)', text)
             if subject_match:
                 subject_format = subject_match.group(1).strip()
         
@@ -270,7 +270,7 @@ class PostProcessor:
             id="",
             title=title,
             institution=institution,
-            content=text[:2000],
+            content=text[:6000],
             post_type=post_type,
             deadline=deadline,
             requirements=requirements,

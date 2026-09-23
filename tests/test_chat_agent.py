@@ -4,7 +4,7 @@ import pytest
 
 from src import chat_agent as ca
 from src import email_sender as es
-from src import rag_store
+from src import digest, rag_store
 from src.humanizer import HumanizationResult
 from src.rag_store import PostProcessor
 from src.writer import GeneratedEmail
@@ -50,6 +50,7 @@ class FakeSender:
 def agent(tmp_path, monkeypatch):
     monkeypatch.setattr(ca, "RESOURCES_DIR", tmp_path / "resources")
     monkeypatch.setattr(rag_store, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(digest, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(es, "CONFIG_DIR", tmp_path / "config")
     monkeypatch.setattr(ca, "HybridLLM", FakeLLM)
     a = ca.ChatAgent()
@@ -151,3 +152,10 @@ def test_post_processor_extracts_subject_and_deadline():
     post = PostProcessor().process_text(POST)
     assert post.metadata["subject_format"] == "PhD Application - Your Name"
     assert post.deadline == "30 November 2026"
+
+
+def test_subject_to_contract_is_not_a_subject_line():
+    post = PostProcessor().process_text("PhD Studentship\nThe offer is subject to contract. Full details later.\n")
+    assert post.metadata["subject_format"] == ""
+    post = PostProcessor().process_text("PhD Studentship\nPlease use the subject line: GNN-PhD-2026\n")
+    assert post.metadata["subject_format"] == "GNN-PhD-2026"
