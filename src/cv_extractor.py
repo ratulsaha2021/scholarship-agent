@@ -165,18 +165,15 @@ class CVExtractor:
         return match.group(0) if match else ""
     
     def _extract_phone(self, text: str) -> str:
-        """Extract phone number."""
-        patterns = [
-            r'[\+]?[(]?[0-9]{1,4}[)]?[-\s\.]?[0-9]{1,4}[-\s\.]?[0-9]{1,9}',
-            r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b',
-            r'\b\d{10}\b'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                return match.group(0)
+        """Phone number: 9-15 digits, optionally with +country code, spaces, dashes, dots or brackets.
+        Requiring 9+ digits keeps house numbers ("240/12 ...") and years out."""
+        candidates = re.findall(r'\+?\(?\d[\d\s().-]{7,18}\d', text)
+        for c in sorted(candidates, key=lambda c: not c.startswith('+')):  # prefer +country code
+            digits = re.sub(r'\D', '', c)
+            if 9 <= len(digits) <= 15 and not re.fullmatch(r'(?:19|20)\d{2}\D+(?:19|20)\d{2}', c.strip()):
+                return re.sub(r'\s+', ' ', c.strip())
         return ""
-    
+
     def _extract_linkedin(self, text: str) -> str:
         """Extract LinkedIn URL."""
         pattern = r'linkedin\.com/in/[a-zA-Z0-9_-]+'

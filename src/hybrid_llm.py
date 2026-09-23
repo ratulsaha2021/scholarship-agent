@@ -1,17 +1,39 @@
-"""Hybrid LLM module - runs Local Llama + Groq together."""
+"""Hybrid LLM module: local model (Ollama) drafts, Groq polishes, rule-based humanizer checks."""
 
 import os
+import re
 import json
+from pathlib import Path
+from typing import Optional, Dict, List
+from dataclasses import dataclass
 
-# Appended to every prompt that writes or rewrites an application email
+from .humanizer import Humanizer, Issue, STYLE_GUIDE
+
+# Appended to every prompt that writes or rewrites application text
 NO_FABRICATION_RULE = (
     "Use ONLY facts stated in the applicant's background or the original text. "
     "Never invent projects, employers, results, numbers, papers or skills. "
     "If a detail isn't given, leave it out."
 )
-from pathlib import Path
-from typing import Optional, Dict, List
-from dataclasses import dataclass
+
+WRITER_ROLES = {
+    "email": "You write short, professional application emails for PhD and scholarship applicants.",
+    "sop": "You write statements of purpose for graduate applicants.",
+    "proposal": "You write research proposals for PhD applicants.",
+}
+MAX_REWRITES = 2
+
+
+def _norm(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _appears_in(claim: str, text: str) -> bool:
+    """Checkers sometimes 'quote' the sources instead of the document; keep only real quotes."""
+    words, doc = _norm(claim), set(_norm(text))
+    if not words:
+        return False
+    return sum(w in doc for w in words) / len(words) >= 0.8
 
 @dataclass
 class LLMConfig:
@@ -50,10 +72,11 @@ class LLMConfig:
             }, f, indent=2)
 
 class HybridLLM:
-    """Runs Local Llama for drafting + Groq for humanization together."""
+    """Drafts with the local model (or Groq), then checks and rewrites against the humanizer rules."""
     
     def __init__(self, config: Optional[LLMConfig] = None):
         self.config = config or LLMConfig.load()
+        self.humanizer = Humanizer()
         self._local_available = None
         self._groq_client = None
     
@@ -111,7 +134,7 @@ class HybridLLM:
                     "num_predict": max_tokens
                 }
             },
-            timeout=120
+            timeout=300
         )
         
         if response.status_code == 200:
@@ -119,268 +142,201 @@ class HybridLLM:
         else:
             raise Exception(f"Ollama error: {response.text}")
     
-    def _call_groq(self, prompt: str, system: str = "", max_tokens: int = 2048) -> str:
+    def _call_groq(self, prompt: str, system: str = "", max_tokens: int = 2048, reasoning: str = "low") -> str:
         """Call Groq API."""
         client = self._get_groq_client()
         if not client:
             raise Exception("Groq API not configured")
-        
+
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        
+
+        kwargs = {}
+        if "gpt-oss" in self.config.groq_model:
+            # Reasoning tokens count against the limit; keep reasoning short so the text isn't cut off
+            kwargs = {"reasoning_effort": reasoning, "include_reasoning": False}
         response = client.chat.completions.create(
             model=self.config.groq_model,
             messages=messages,
-            max_tokens=max_tokens,
-            temperature=0.7
+            max_completion_tokens=max_tokens,
+            temperature=0.7,
+            **kwargs,
         )
-        
-        return response.choices[0].message.content
-    
-    def hybrid_generate(self, prompt: str, context: str = "") -> Dict:
-        """
-        Hybrid pipeline:
-        1. Local Llama drafts the email
-        2. Local Llama checks AI patterns
-        3. Groq does final humanization
-        """
-        result = {
-            "draft": "",
-            "ai_analysis": {},
-            "humanized": "",
-            "local_used": False,
-            "groq_used": False,
-            "fallback": False,
-            "error": ""
-        }
-        
-        # Step 1: Local Llama drafts email
-        draft_system = f"""You are a professional academic email writer. Write concise, specific, 
-human-like emails for scholarship/PhD applications. Be direct, avoid AI patterns.
+        content = response.choices[0].message.content or ""
+        if not content.strip():
+            raise Exception(f"Groq returned no text (finish reason: {response.choices[0].finish_reason})")
+        return content
 
-{context}
+    def _drafting_system(self, kind: str, context: str) -> str:
+        return f"""{WRITER_ROLES[kind]}
 
-Rules:
-- Use contractions (I'm, don't, can't)
-- Vary sentence length
-- Be specific, not generic
-- No "I am writing to express..." openings
-- Reference specific papers/projects from the background when relevant
-- Keep under 300 words
-- {NO_FABRICATION_RULE}"""
-        
-        try:
-            if self._check_local_available():
-                result["draft"] = self._call_local(prompt, draft_system)
-                result["local_used"] = True
-            elif self.config.groq_api_key:
-                result["draft"] = self._call_groq(prompt, draft_system)
-            else:
-                result["draft"] = self._fallback_draft(prompt)
-                result["fallback"] = True
-                result["error"] = "No LLM available (Ollama model not found and no Groq key)."
-        except Exception as e:
-            result["draft"] = self._fallback_draft(prompt)
-            result["fallback"] = True
-            result["error"] = str(e)
+{STYLE_GUIDE}
+- {NO_FABRICATION_RULE}
 
-        if result["fallback"]:
-            # Don't run the template through the rest of the pipeline
-            result["humanized"] = result["draft"]
-            return result
-        
-        # Step 2: Local Llama checks AI patterns
-        check_prompt = f"""Analyze this email for AI writing patterns. Return JSON with:
-- "ai_score": 0-100 (higher = more AI-like)
-- "patterns_found": list of specific AI patterns found
-- "suggestions": list of specific fixes
+Applicant background:
+{context}"""
 
-Email:
-{result['draft']}"""
-        
-        check_system = """You are an AI detection expert. Analyze text for common AI writing patterns:
-- Overused phrases (furthermore, moreover, crucial, leverage, etc.)
-- Perfect paragraph structure
-- No contractions
-- Listing with semicolons
-- Generic statements
-- Lack of specific examples
-- Passive voice overuse
+    def _draft(self, prompt: str, system: str, max_tokens: int, result: Dict) -> str:
+        if self._check_local_available():
+            result["local_used"] = True
+            return self._call_local(prompt, system, max_tokens)
+        if self.config.groq_api_key:
+            result["groq_used"] = True
+            return self._call_groq(prompt, system, max_tokens)
+        raise Exception("No LLM available (Ollama model not found and no Groq key).")
 
-Return ONLY valid JSON."""
-        
-        try:
-            if self._check_local_available():
-                response = self._call_local(check_prompt, check_system, max_tokens=1000)
-            elif self.config.groq_api_key:
-                response = self._call_groq(check_prompt, check_system, max_tokens=1000)
-            else:
-                response = '{"ai_score": 50, "patterns_found": [], "suggestions": []}'
-            
-            import re
-            json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
-            if json_match:
-                result["ai_analysis"] = json.loads(json_match.group())
-            else:
-                result["ai_analysis"] = {"ai_score": 50, "patterns_found": [], "suggestions": []}
-        except Exception:
-            result["ai_analysis"] = {"ai_score": 50, "patterns_found": [], "suggestions": []}
-        
-        # Step 3: Groq final humanization
-        patterns = result["ai_analysis"].get("patterns_found", [])
-        suggestions = result["ai_analysis"].get("suggestions", [])
-        
-        humanize_prompt = f"""Rewrite this email to sound more human and natural.
+    def _rewrite(self, prompt: str, max_tokens: int, result: Dict) -> str:
+        # Groq is usually the stronger editor; fall back to the local model
+        if self.config.groq_api_key:
+            result["groq_used"] = True
+            return self._call_groq(prompt, max_tokens=max_tokens)
+        result["local_used"] = True
+        return self._call_local(prompt, max_tokens=max_tokens)
 
-Original:
-{result['draft']}
+    def polish(self, text: str, kind: str = "email", context: str = "",
+               max_tokens: int = 2048, result: Optional[Dict] = None) -> Dict:
+        """Clean deterministically, then rewrite with the LLM until no strong AI patterns remain."""
+        result = result if result is not None else {"local_used": False, "groq_used": False}
+        text = self.humanizer.clean(text, kind)
+        issues = self.humanizer.detect(text, kind)
+        rewrites = 0
+        # Long documents: rewrite only for strong tells (each pass regenerates the whole document)
+        max_rewrites = MAX_REWRITES if kind == "email" else 1
+        needs = (lambda iss: self.humanizer.needs_rewrite(iss)) if kind == "email" else \
+                (lambda iss: any(i.strong for i in iss))
+        while needs(issues) and rewrites < max_rewrites and self.is_available():
+            prompt = self.humanizer.rewrite_prompt(text, issues, kind, context)
+            try:
+                candidate = self.humanizer.clean(self._rewrite(prompt, max_tokens, result), kind)
+            except Exception:
+                break
+            rewrites += 1
+            new_issues = self.humanizer.detect(candidate, kind)
+            # Guard against a rewrite that drops most of the content
+            if len(candidate.split()) < 0.6 * len(text.split()):
+                continue
+            text, issues = candidate, new_issues
 
-Issues found:
-{json.dumps(patterns, indent=2)}
-
-Suggestions:
-{json.dumps(suggestions, indent=2)}
-
-Rewrite rules:
-1. Add contractions (I'm, don't, can't, won't)
-2. Vary sentence lengths (mix short and long)
-3. Use casual transitions (Also, But, So, Plus)
-4. Sound like a real person, not a template
-5. Keep the core message and every fact exactly as given
-6. Remove any remaining AI-sounding phrases
-7. Do NOT add any new facts, projects, numbers or claims. {NO_FABRICATION_RULE}
-
-Return ONLY the rewritten email text, no explanations."""
-        
-        humanize_system = """You are an expert at making AI-generated text sound human. 
-Your goal is to make the text undetectable by AI detection tools while maintaining 
-professional quality. Be creative and natural."""
-        
-        try:
-            if self.config.groq_api_key:
-                result["humanized"] = self._call_groq(humanize_prompt, humanize_system)
-                result["groq_used"] = True
-            elif self._check_local_available():
-                result["humanized"] = self._call_local(humanize_prompt, humanize_system)
-            else:
-                result["humanized"] = self._fallback_humanize(result["draft"])
-        except Exception:
-            result["humanized"] = result["draft"]
-        
+        result.update({
+            "humanized": text,
+            "issues": issues,
+            "rewrites": rewrites,
+            "ai_analysis": {
+                "ai_score": round(100 * (1 - self.humanizer.score(issues))),
+                "patterns_found": [i.label for i in issues],
+                "suggestions": [i.advice for i in issues],
+            },
+        })
         return result
-    
-    def draft_email(self, prompt: str, context: str = "") -> str:
-        """Draft email (used by writer)."""
-        result = self.hybrid_generate(prompt, context)
-        return result["humanized"]
-    
-    def check_ai_patterns(self, text: str) -> Dict:
-        """Check for AI patterns."""
-        check_prompt = f"""Analyze this email for AI writing patterns. Return JSON with:
-- "ai_score": 0-100 (higher = more AI-like)
-- "patterns_found": list of specific AI patterns found
-- "suggestions": list of specific fixes
 
-Email:
-{text}"""
-        
-        check_system = """You are an AI detection expert. Analyze text for common AI writing patterns.
-Return ONLY valid JSON."""
-        
-        try:
-            if self._check_local_available():
-                response = self._call_local(check_prompt, check_system, max_tokens=1000)
-            elif self.config.groq_api_key:
-                response = self._call_groq(check_prompt, check_system, max_tokens=1000)
-            else:
-                return {"ai_score": 50, "patterns_found": [], "suggestions": []}
-            
-            import re
-            json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            
-            return {"ai_score": 50, "patterns_found": [], "suggestions": []}
-        except Exception:
-            return {"ai_score": 50, "patterns_found": [], "suggestions": []}
-    
-    def humanize_text(self, text: str, ai_analysis: Dict) -> str:
-        """Humanize using Groq."""
-        patterns = ai_analysis.get("patterns_found", [])
-        suggestions = ai_analysis.get("suggestions", [])
-        
-        prompt = f"""Rewrite this email to sound more human and natural.
+    def fact_check(self, text: str, sources: str, result: Optional[Dict] = None) -> List[Dict]:
+        """Ask the model to list claims in `text` that the sources don't support. Returns [] if clean
+        or if no model is available."""
+        result = result if result is not None else {}
+        prompt = f"""You are fact-checking an application document against its sources.
 
-Original:
+SOURCES (the only ground truth: the applicant's background, the job post, the applicant's notes):
+{sources}
+
+DOCUMENT:
 {text}
 
-Issues found:
-{json.dumps(patterns, indent=2)}
+List every statement in the DOCUMENT that is not supported by the SOURCES or contradicts them. Check:
+- degrees, thesis level (undergraduate vs master's), institutions, dates, grades
+- paper titles, venues, co-authorship, results and numbers, dataset and tool names (exact names)
+- roles, employers, projects and skills
+- claims about the program, lab, supervisor or resources that the post doesn't state
+Plans, research questions and proposed methods are fine; they're not claims of fact.
 
-Suggestions:
-{json.dumps(suggestions, indent=2)}
-
-Do NOT add new facts. {NO_FABRICATION_RULE}
-Return ONLY the rewritten email text, no explanations."""
-        
-        system = """You are an expert at making AI-generated text sound human."""
-        
+Return ONLY JSON: {{"problems": [{{"claim": "<exact words from the document>", "issue": "<what the sources say instead>"}}]}}
+Return {{"problems": []}} if everything is supported."""
         try:
             if self.config.groq_api_key:
-                return self._call_groq(prompt, system)
-            elif self._check_local_available():
-                return self._call_local(prompt, system)
+                # Checking needs more care than writing
+                result["groq_used"] = True
+                raw = self._call_groq(prompt, max_tokens=6000, reasoning="medium")
             else:
-                return self._fallback_humanize(text)
+                raw = self._rewrite(prompt, 2000, result)
         except Exception:
-            return text
-    
-    def generate(self, prompt: str, system: str = "", use_groq: bool = False) -> str:
+            return []
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return []
+        try:
+            problems = json.loads(match.group()).get("problems", [])
+        except (ValueError, AttributeError):
+            return []
+        return [p for p in problems
+                if isinstance(p, dict) and p.get("claim") and _appears_in(p["claim"], text)]
+
+    def fix_facts(self, text: str, problems: List[Dict], kind: str, sources: str,
+                  max_tokens: int, result: Dict) -> str:
+        listed = "\n".join(f'- "{p["claim"]}": {p.get("issue", "not supported")}' for p in problems)
+        prompt = f"""Correct these factual problems in the document. Fix each one using the sources, or remove
+the claim if the sources don't support it. Change nothing else.
+
+Problems:
+{listed}
+
+Sources:
+{sources}
+
+Document:
+{text}
+
+Return ONLY the corrected document."""
+        return self.humanizer.clean(self._rewrite(prompt, max_tokens, result), kind)
+
+    def hybrid_generate(self, prompt: str, context: str = "", kind: str = "email",
+                        max_tokens: int = 2048) -> Dict:
+        """
+        1. Draft with the local model (Groq if it isn't available), with the style guide as system prompt
+        2. Rule-based humanizer check (no LLM call)
+        3. Targeted rewrite of what the check found (Groq preferred), repeated at most twice
+        4. Fact check against the background + post; fix what's unsupported, then check once more
+        """
+        result = {"draft": "", "humanized": "", "issues": [], "ai_analysis": {}, "fact_fixes": [],
+                  "fact_problems": [], "local_used": False, "groq_used": False, "fallback": False,
+                  "error": "", "rewrites": 0}
+        try:
+            result["draft"] = self._draft(prompt, self._drafting_system(kind, context), max_tokens, result)
+        except Exception as e:
+            result.update({"fallback": True, "error": str(e), "draft": "", "humanized": ""})
+            return result
+        self.polish(result["draft"], kind, context, max_tokens, result)
+
+        # The prompt holds the post and the applicant's notes, so it's part of the ground truth
+        sources = f"{context}\n\nREQUEST (post and applicant notes):\n{prompt}"
+        problems = self.fact_check(result["humanized"], sources, result)
+        if problems:
+            try:
+                fixed = self.fix_facts(result["humanized"], problems, kind, sources, max_tokens, result)
+                if len(fixed.split()) >= 0.6 * len(result["humanized"].split()):
+                    result["fact_fixes"] = problems
+                    self.polish(fixed, kind, context, max_tokens, result)
+                    # Second check only for long documents; emails are short and this halves their wait
+                    result["fact_problems"] = (self.fact_check(result["humanized"], sources, result)
+                                               if kind != "email" else [])
+            except Exception:
+                result["fact_problems"] = problems
+        return result
+
+    def is_available(self) -> bool:
+        return bool(self.config.groq_api_key) or self._check_local_available()
+
+    def generate(self, prompt: str, system: str = "", use_groq: bool = False, max_tokens: int = 2048) -> str:
         """General generation."""
         if use_groq and self.config.groq_api_key:
-            return self._call_groq(prompt, system)
+            return self._call_groq(prompt, system, max_tokens)
         elif self._check_local_available():
-            return self._call_local(prompt, system)
+            return self._call_local(prompt, system, max_tokens)
         elif self.config.groq_api_key:
-            return self._call_groq(prompt, system)
+            return self._call_groq(prompt, system, max_tokens)
         else:
             return "No LLM available."
-    
-    def _fallback_draft(self, prompt: str) -> str:
-        """Fallback when no LLM available."""
-        return """Dear Professor,
 
-I hope this email finds you well. I am writing to express my interest in potential 
-research opportunities in your group.
-
-I have a background in [Your Field] and am particularly interested in [Specific Topic]. 
-I believe my skills align well with your research focus.
-
-I would welcome the opportunity to discuss potential openings or collaborations.
-
-Best regards,
-[Your Name]"""
-    
-    def _fallback_humanize(self, text: str) -> str:
-        """Fallback humanization without LLM."""
-        import re
-        
-        result = text
-        
-        contractions = {
-            "I am": "I'm", "I have": "I've", "I will": "I'll",
-            "do not": "don't", "does not": "doesn't", "did not": "didn't",
-            "cannot": "can't", "would not": "wouldn't", "should not": "shouldn't",
-            "it is": "it's", "that is": "that's", "there is": "there's"
-        }
-        
-        for full, contraction in contractions.items():
-            result = re.sub(r'\b' + full + r'\b', contraction, result, flags=re.IGNORECASE)
-        
-        return result
-    
     def get_status(self) -> Dict:
         """Get status of both models."""
         return {

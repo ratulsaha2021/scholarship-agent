@@ -9,7 +9,8 @@ from datetime import datetime
 from .config import AgentConfig
 from .resource_loader import UserResources
 from .humanizer import Humanizer
-from .writer import EmailWriter, GeneratedEmail
+from .writer import EmailWriter, GeneratedEmail, GeneratedDocument, DOC_NAMES
+from .documents import save_document
 from .cv_extractor import CVExtractor, ExtractedCV
 from .rag_store import RAGStore, ApplicationPost, PostProcessor
 from .ocr_processor import OCRProcessor
@@ -23,6 +24,10 @@ RESOURCES_DIR = Path(__file__).parent.parent / "resources"
 CV_EXTENSIONS = ["pdf", "docx", "txt"]
 URL_RE = r"https?://[^\s<>\"')\]]+"
 FIND_RE = r"^\s*(?:find|search(?:\s+for)?|look\s+for)\s+(.+?)\s*$"
+SOP_WORDS = ["sop", "statement of purpose", "personal statement", "motivation letter",
+             "letter of motivation", "research statement"]
+PROPOSAL_WORDS = ["proposal", "research proposal", "research plan"]
+DONE_WORDS = ["done", "ok", "okay", "looks good", "good", "great", "perfect", "fine", "thanks", "thank you"]
 PICK_RE = r"^\s*(?:apply|open|pick|use)\s*(?:to|for)?\s*(?:#|no\.?|number)?\s*(\d+)\s*$"
 EMAIL_RE = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 SMTP_PROVIDERS = {
@@ -57,6 +62,9 @@ class ChatAgent:
         self.fetcher = PoliteFetcher(delay=self.config.discovery.delay_between_requests)
         self.watch = WatchList()
         self.search_results = []
+        self.current_doc = None
+        self.post_documents = {}   # kind -> saved .docx/.md paths for the current post
+        self.saved_documents = []  # everything generated this session, for downloads
 
     def _load_persistent_resources(self):
         return UserResources.load(RESOURCES_DIR)
@@ -81,11 +89,17 @@ class ChatAgent:
     def chat(self, user_message):
         self.conversation_history.append({"role": "user", "content": user_message})
 
-        if self.flow_state != "idle" and self._is_web_command(user_message):
-            # A link, search or pick always starts fresh, whatever we were waiting for
+        if self.flow_state != "idle" and (self._is_web_command(user_message) or self._doc_request(user_message)):
+            # A link, search, pick or document request always starts fresh, whatever we were waiting for
             self.flow_state = "idle"
 
-        if self.flow_state == "waiting_cv":
+        if self.flow_state == "waiting_sop_notes":
+            response = self._handle_sop_notes(user_message)
+        elif self.flow_state == "waiting_proposal_topic":
+            response = self._handle_proposal_topic(user_message)
+        elif self.flow_state == "reviewing_doc":
+            response = self._handle_doc_response(user_message)
+        elif self.flow_state == "waiting_cv":
             response = self._handle_cv_response(user_message)
         elif self.flow_state == "waiting_send":
             response = self._handle_send_response(user_message)
@@ -230,6 +244,12 @@ class ChatAgent:
         if is_post:
             return self._process_post(message)
 
+        doc_kind = self._doc_request(message)
+        if doc_kind == "sop":
+            return self._handle_sop_request(message)
+        if doc_kind == "proposal":
+            return self._handle_proposal_request(message)
+
         # Explicit commands first, so they aren't swallowed by broader keywords
         if has_word(ml, ["setup email", "set up email", "configure email", "smtp"]):
             return self._handle_setup_email(message)
@@ -305,16 +325,20 @@ class ChatAgent:
         resp += "\n"
 
         needs = self._analyze_requirements(post.content)
+        self.post_documents = {}
+        self.current_doc = None
 
         if not has_cv:
             self.flow_state = "waiting_cv"
             resp += "I don't have your CV yet. Please upload it so I can personalize the application."
-        elif needs.get("needs_clarification"):
-            self.flow_state = "waiting_clarification"
-            resp += needs["clarification_question"]
         else:
-            resp += "I have your profile. Type **'write'** to generate the email/application."
             self.flow_state = "idle"
+            asks = [name for kind, name in [("sop", "statement of purpose"), ("proposal", "research proposal")]
+                    if needs[kind]]
+            if asks:
+                cmds = " and ".join(f"**'write {'sop' if 'statement' in a else 'proposal'}'**" for a in asks)
+                resp += f"This post asks for a {' and a '.join(asks)}. Type {cmds} to draft it.\n\n"
+            resp += "Type **'write'** to generate the email."
 
         rag_post = ApplicationPost(
             id="", title=post.title, institution=post.institution,
@@ -326,30 +350,12 @@ class ChatAgent:
         return resp
 
     def _analyze_requirements(self, post_content):
-        needs = {
-            "needs_research_statement": False,
-            "needs_proposal": False,
-            "needs_clarification": False,
-            "clarification_question": "",
-        }
+        """Which documents the post asks for, beyond the email."""
         cl = post_content.lower()
-
-        if "research statement" in cl or "research plan" in cl:
-            needs["needs_research_statement"] = True
-            needs["needs_clarification"] = True
-            needs["clarification_question"] = (
-                "This position requires a research statement.\n\n"
-                "Please describe your research interests and plans, "
-                "or I can draft one based on your CV."
-            )
-        elif "proposal" in cl:
-            needs["needs_proposal"] = True
-            needs["needs_clarification"] = True
-            needs["clarification_question"] = (
-                "This position requires a research proposal.\n\n"
-                "Do you have one ready, or should I draft one?"
-            )
-        return needs
+        return {
+            "sop": has_word(cl, SOP_WORDS),
+            "proposal": has_word(cl, PROPOSAL_WORDS),
+        }
 
     def _handle_cv_response(self, message):
         if has_word(message.lower(), ["upload", "here", "how"]) and len(message.split()) <= 8:
@@ -410,32 +416,13 @@ class ChatAgent:
         """Modify the pending email based on user instruction."""
         if not self.pending_email:
             return "No email to edit."
-
-        prompt = f"""Edit this email based on the instruction:
-
-Current email:
-{self.pending_email.body}
-
-Instruction: {instruction}
-
-Applicant background (the only source of facts):
-{self.resources.to_context_string()}
-
-Rules:
-- Apply the instruction and keep everything else as it is.
-- {NO_FABRICATION_RULE}
-- Don't open with "I am writing to express".
-- Return ONLY the email body (greeting to sign-off). No subject line, no explanations."""
-
-        try:
-            edited = self.llm.generate(prompt, use_groq=True)
-            if not edited.strip() or edited == "No LLM available.":
-                return "No LLM available to edit the email. Start Ollama or add a Groq key (`setup groq KEY`)."
-            self.pending_email.body = edited
-            return (f"**Updated email:**\n\n{edited}\n\n---\n\n"
-                    "Type **'send'** to send, **'edit'** to change more.")
-        except Exception:
-            return "Couldn't edit. Please rephrase your request."
+        revised = self.writer.revise_email(self.pending_email, instruction)
+        if revised.error:
+            return f"Couldn't edit the email: {revised.error}"
+        self.pending_email = revised
+        return (f"**Updated email:**\n\n{revised.body}\n\n---\n\n"
+                f"_{self.humanizer.report(revised.issues)}_\n\n"
+                "Type **'send'** to send, or tell me what else to change.")
 
     def _handle_clarification_response(self, message):
         self.context["clarification"] = message
@@ -525,7 +512,7 @@ Rules:
         )
 
         generated = self.writer.write_scholarship_application(
-            post_obj, clarification or None, cv_attached=self._cv_file() is not None
+            post_obj, clarification or None, attachments=self._attachment_names()
         )
         if generated.error:
             return (f"**Couldn't generate the email:** {generated.error}\n\n"
@@ -538,11 +525,11 @@ Rules:
         llm_status = self.llm.get_status()
         model_info = ""
         if llm_status["local_available"] and llm_status["groq_configured"]:
-            model_info = "*Local Llama drafted + Groq humanized*"
+            model_info = "Local model drafted, Groq edited"
         elif llm_status["groq_configured"]:
-            model_info = "*Groq API*"
+            model_info = "Groq"
         elif llm_status["local_available"]:
-            model_info = "*Local Llama*"
+            model_info = "Local model"
 
         resp = f"**To:** {generated.to_email or '(email not in post)'}\n"
         resp += f"**Subject:** {generated.subject}\n"
@@ -551,7 +538,12 @@ Rules:
         resp += "\n---\n\n"
         resp += generated.body
         resp += "\n\n---\n\n"
-        resp += "Type **'send'** to send, **'edit'** to modify, or **'cancel'**."
+        resp += f"_{self.humanizer.report(generated.issues)}_\n\n"
+        resp += self._fact_report(generated)
+        attached = self._attachment_names()
+        if attached:
+            resp += f"Sending will attach your {', '.join(attached)}.\n\n"
+        resp += "Type **'send'** to send, tell me what to change, or **'cancel'**."
 
         return resp
 
@@ -564,13 +556,13 @@ Rules:
         if not self.pending_email.to_email:
             return ("The post didn't include a recipient address.\n\n"
                     "Type `to: professor@university.edu` to set one, then **'send'**.")
-        cv_file = self._cv_file()
+        attachments = self._attachments()
         result = self.email_sender.send_email(
             to_email=self.pending_email.to_email,
             subject=self.pending_email.subject,
             body=self.pending_email.body,
             from_name=self.resources.name,
-            attachments=[cv_file] if cv_file else None,
+            attachments=attachments or None,
         )
         if not result["success"]:
             # Keep the draft so the user can fix the problem and retry
@@ -578,8 +570,180 @@ Rules:
         self.pending_email = None
         self.flow_state = "idle"
         self.current_post = None
-        attached = " (CV attached)" if cv_file else ""
+        self.post_documents = {}
+        names = [name for _, name in attachments]
+        attached = f" (attached: {', '.join(names)})" if names else ""
         return f"**Email sent to {result['to']}!**{attached}\n\nPaste another post anytime."
+
+    def _attachment_names(self):
+        names = ["CV"] if self._cv_file() else []
+        names += [DOC_NAMES[k].lower() for k in ("sop", "proposal") if k in self.post_documents]
+        return names
+
+    def _attachments(self):
+        """(path, filename the recipient sees) for the CV and documents written for this post."""
+        person = re.sub(r"[^A-Za-z0-9]+", "_", (self.resources.name or "Applicant").title()).strip("_")
+        files = []
+        cv = self._cv_file()
+        if cv:
+            files.append((cv, f"{person}_CV{cv.suffix}"))
+        for kind in ("sop", "proposal"):
+            paths = self.post_documents.get(kind)
+            if paths and "docx" in paths:
+                files.append((paths["docx"], f"{person}_{DOC_NAMES[kind].replace(' ', '_')}.docx"))
+        return files
+
+    # ---------- statement of purpose / research proposal ----------
+
+    def _doc_request(self, message):
+        """'write sop', 'draft a research proposal', 'sop 800 words', 'sop notes' -> kind; else None."""
+        ml = message.lower().strip()
+        if len(ml.split()) > 8:
+            return None
+        verb = r"^\s*(?:(?:write|draft|generate|create|prepare|redo)\s+(?:(?:a|an|my|new)\s+)?)?"
+        if re.match(verb + r"(?:" + "|".join(re.escape(w) for w in SOP_WORDS) + r")\b", ml) \
+                or re.match(r"^\s*(?:update\s+)?sop\s+notes\b", ml):
+            return "sop"
+        if re.match(verb + r"(?:" + "|".join(re.escape(w) for w in sorted(PROPOSAL_WORDS, key=len, reverse=True)) + r")\b", ml):
+            return "proposal"
+        return None
+
+    def _post_obj(self):
+        if not self.current_post:
+            return None
+        return ApplicationPost(
+            id="", title=self.current_post["title"],
+            institution=self.current_post["institution"],
+            content=self.current_post["content"],
+            post_type=self.current_post["type"],
+            deadline=self.current_post["deadline"],
+            requirements=self.current_post["requirements"],
+            metadata=self.current_post.get("metadata", {}),
+        )
+
+    @staticmethod
+    def _word_limit(message):
+        m = re.search(r"(\d{3,4})\s*(?:-\s*\d{3,4}\s*)?words?", message.lower())
+        return f"about {m.group(1)} words" if m else ""
+
+    def _sop_notes_file(self):
+        return RESOURCES_DIR / "sop_notes.txt"
+
+    def _handle_sop_request(self, message):
+        if not self.resources.name:
+            self.flow_state = "waiting_cv"
+            return "I need your CV first. Please upload it."
+        self.context["word_limit"] = self._word_limit(message)
+        notes_file = self._sop_notes_file()
+        if notes_file.exists() and "notes" not in message.lower():
+            return self._generate_doc("sop", notes=notes_file.read_text(encoding="utf-8"),
+                                      note="Using your saved SOP notes (type `sop notes` to update them).")
+        self.flow_state = "waiting_sop_notes"
+        return ("A good SOP needs a few things only you know. Answer in one message (short is fine):\n\n"
+                "1. What got you into your research area, concretely (a course, project, problem)?\n"
+                "2. What do you want to work on in the PhD/program?\n"
+                "3. Your career goal after it?\n\n"
+                "I'll save these for future SOPs. Or type **'skip'** and I'll write it from your CV only "
+                "(without inventing a personal story).")
+
+    def _handle_sop_notes(self, message):
+        notes = "" if message.lower().strip() in ["skip", "no", "none"] else message.strip()
+        if notes:
+            RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+            self._sop_notes_file().write_text(notes, encoding="utf-8")
+        return self._generate_doc("sop", notes=notes)
+
+    def _handle_proposal_request(self, message):
+        if not self.resources.name:
+            self.flow_state = "waiting_cv"
+            return "I need your CV first. Please upload it."
+        self.context["word_limit"] = self._word_limit(message)
+        self.flow_state = "waiting_proposal_topic"
+        base = f" for **{self.current_post['title']}**" if self.current_post else ""
+        return (f"What should the proposal{base} be about? Give me your idea in a few lines "
+                "(problem, rough approach, any data you'd use).\n\n"
+                "Or type **'skip'** and I'll propose a topic that fits the post and your background.")
+
+    def _handle_proposal_topic(self, message):
+        topic = "" if message.lower().strip() in ["skip", "no", "none"] else message.strip()
+        return self._generate_doc("proposal", notes=topic)
+
+    def _generate_doc(self, kind, notes="", note=""):
+        post = self._post_obj()
+        limit = self.context.pop("word_limit", "")
+        if kind == "sop":
+            doc = self.writer.write_sop(post, notes=notes, word_limit=limit)
+        else:
+            doc = self.writer.write_proposal(post, topic=notes, word_limit=limit)
+        if doc.error:
+            self.flow_state = "idle"
+            return (f"**Couldn't generate the {DOC_NAMES[kind].lower()}:** {doc.error}\n\n"
+                    "Check that Ollama is running or that your Groq key and model are valid.")
+        return self._show_doc(doc, note)
+
+    def _show_doc(self, doc, note="", heading=None):
+        paths = save_document(doc, author=self.resources.name)
+        self.current_doc = doc
+        if self.current_post:
+            self.post_documents[doc.kind] = paths
+        self.saved_documents.append({"label": f"{doc.title} ({doc.post_title or 'general'})", "paths": paths})
+        self.flow_state = "reviewing_doc"
+
+        words = len(doc.text.split())
+        resp = ""
+        if note:
+            resp += f"_{note}_\n\n"
+        resp += f"**{heading or doc.title}**" + (f" for {doc.post_title}" if doc.post_title else "") + f" ({words} words)\n\n---\n\n"
+        resp += doc.text
+        resp += "\n\n---\n\n"
+        resp += f"_{self.humanizer.report(doc.issues)}_\n\n"
+        resp += self._fact_report(doc)
+        if doc.kind == "proposal" and "[citation needed]" in doc.text.lower():
+            resp += "_Marked [citation needed] where a claim needs a source I don't have. Add real references before sending._\n\n"
+        resp += f"Saved as `{paths.get('docx', paths['md']).name}` (download from the sidebar).\n\n"
+        if self.current_post:
+            resp += "It'll be attached when you send the email for this post. "
+        resp += "Tell me what to change, or type **'done'**."
+        return resp
+
+    @staticmethod
+    def _fact_report(item):
+        out = ""
+        if item.fact_fixes:
+            out += f"_Fact check: corrected {len(item.fact_fixes)} claim(s) that didn't match your CV or the post._\n\n"
+        if item.fact_problems:
+            out += "**Check these before sending**, they may not match your CV:\n"
+            out += "\n".join(f"- \"{p['claim']}\" ({p.get('issue', 'unsupported')})" for p in item.fact_problems[:5])
+            out += "\n\n"
+        return out
+
+    def _handle_doc_response(self, message):
+        ml = message.lower().strip()
+        if not ml:
+            return "Tell me what to change, or type **'done'**."
+        if ml in DONE_WORDS:
+            self.flow_state = "idle"
+            nxt = "Type **'write'** to draft the email." if self.current_post and not self.pending_email else \
+                  "Type **'send'** when ready." if self.pending_email else "Paste a post or `find` one anytime."
+            return f"Saved. {nxt}"
+        if ml in ["show", "show it", "show again"]:
+            return self._show_doc(self.current_doc, heading=self.current_doc.title)
+        commands = ["write", "email", "send", "status", "help", "cancel", "digest"]
+        if ml.split()[0] in commands or re.match(r"^\s*to\s*:", ml):
+            self.flow_state = "waiting_send" if self.pending_email and ml.split()[0] in ["send", "cancel"] else "idle"
+            return self.chat_dispatch(message)
+        if ml in ["fix", "fix it", "fix style", "fix them"]:
+            message = "Fix the remaining style problems without changing any facts."
+        revised = self.writer.revise_document(self.current_doc, message)
+        if revised.error:
+            return f"Couldn't revise: {revised.error}"
+        return self._show_doc(revised, heading=f"Updated {revised.title.lower()}")
+
+    def chat_dispatch(self, message):
+        """Route a message for the current state without recording it twice in history."""
+        if self.flow_state == "waiting_send":
+            return self._handle_send_response(message)
+        return self._handle_new_message(message)
 
     def _cv_file(self):
         for ext in CV_EXTENSIONS:
@@ -676,6 +840,8 @@ Rules:
                 "- `watch QUERY` / `unwatch QUERY` / `watches` — saved searches\n"
                 "- `digest` — new listings for your saved searches\n"
                 "- `write` — generate email for loaded post\n"
+                "- `write sop` — statement of purpose (add e.g. `800 words`)\n"
+                "- `write proposal` — research proposal\n"
                 "- `send` — send the drafted email")
 
     def _show_status(self):

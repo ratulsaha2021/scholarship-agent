@@ -6,7 +6,7 @@ Paste a post, a link to one, or a screenshot, or search job sites from the chat,
 
 1. Finds openings on EURAXESS and jobs.ac.uk, ranked against your profile (optional)
 2. Parses the title, institution, deadline, contact email and any required subject line
-3. Uses your CV/profile to draft a short, specific email (no invented facts)
+3. Uses your CV/profile to draft a short, specific email, plus a statement of purpose and research proposal if needed (fact-checked against your CV)
 4. Lets you edit it in plain language ("make it shorter", "mention my TB paper")
 5. Sends it over SMTP with your CV attached, only after you explicitly confirm
 
@@ -91,6 +91,9 @@ Open http://localhost:8501.
 | `watch QUERY` / `unwatch QUERY` / `watches` | Manage saved searches |
 | `digest` | Show listings for your saved searches that you haven't seen yet |
 | `write` | Draft an email for the loaded post |
+| `write sop` (optionally `sop 800 words`) | Statement of purpose. Asks 3 short questions the first time (saved to `resources/sop_notes.txt`; `sop notes` to update) |
+| `write proposal` | Research proposal with sections, work plan and references (only real ones; `[citation needed]` where a source is missing) |
+| `done` / `fix` / any instruction | While reviewing an SOP or proposal: finish, fix style issues, or revise |
 | `send` / `yes` | Send the drafted email (short, explicit confirmations only) |
 | `to: prof@uni.edu` | Set the recipient if the post didn't include one |
 | `cancel` | Discard the draft |
@@ -101,6 +104,18 @@ Open http://localhost:8501.
 | `setup groq KEY` | Save a Groq API key |
 
 For Gmail, use an [App Password](https://myaccount.google.com/apppasswords), not your normal password. Credentials are stored in `config/email_config.json` (gitignored).
+
+## Writing quality
+
+Every email, SOP and proposal goes through the same pipeline (`src/hybrid_llm.py`):
+
+1. **Draft** with a style guide based on Wikipedia's [Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing).
+2. **Humanizer check** (`src/humanizer.py`, rule-based, no LLM): flags staged contrasts ("not X but Y"), dramatic closers, dashes, AI vocabulary (delve, pivotal, showcase…), inflated significance, sales language, flattery, stock openers ("I hope this email finds you well"), placeholders and more. Mechanical tells are fixed directly; the rest trigger a targeted rewrite listing exactly what was found.
+3. **Fact check** against your full CV and the post: claims that don't match (wrong degree, invented results, misnamed datasets, wrong author order) are corrected. Anything still doubtful is listed under "Check these before sending".
+
+The goal is writing that reads like a careful applicant wrote it: plain and specific, without slang or deliberate mistakes. The pipeline reduces errors but doesn't guarantee they're gone, so read everything before sending, especially numbers and references. Some programs also ask you to declare AI assistance.
+
+SOPs and proposals are saved as `.docx` and `.md` in `resources/saved_responses/`, can be downloaded from the sidebar, and are attached (with your CV) when you send the email for that post.
 
 ## Web search
 
@@ -153,8 +168,9 @@ scholarship-agent/
 ├── src/
 │   ├── chat_agent.py       # Chat flow: post → CV → draft → edit → send
 │   ├── hybrid_llm.py       # Ollama + Groq pipeline
-│   ├── writer.py           # Email prompts
-│   ├── humanizer.py        # Rule-based AI-pattern detection
+│   ├── writer.py           # Email, SOP and proposal prompts
+│   ├── documents.py        # .docx/.md export
+│   ├── humanizer.py        # AI-writing pattern detection and fixes
 │   ├── cv_extractor.py     # CV parsing (PDF/DOCX/TXT)
 │   ├── rag_store.py        # Post parsing + local post store (data/posts.json)
 │   ├── ocr_processor.py    # Screenshot OCR (tesseract)

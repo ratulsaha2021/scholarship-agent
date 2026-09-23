@@ -57,7 +57,7 @@ class EmailSender:
         body: str,
         from_name: str = "",
         reply_to: Optional[str] = None,
-        attachments: Optional[List[Path]] = None
+        attachments: Optional[List] = None
     ) -> Dict:
         """Send an email."""
         if not self.is_configured():
@@ -78,9 +78,11 @@ class EmailSender:
             
             msg.attach(MIMEText(body, 'plain'))
 
-            for path in attachments or []:
-                part = MIMEApplication(Path(path).read_bytes(), Name=Path(path).name)
-                part['Content-Disposition'] = f'attachment; filename="{Path(path).name}"'
+            for item in attachments or []:
+                # Either a path, or (path, filename the recipient sees)
+                path, name = item if isinstance(item, tuple) else (item, Path(item).name)
+                part = MIMEApplication(Path(path).read_bytes(), Name=name)
+                part['Content-Disposition'] = f'attachment; filename="{name}"'
                 msg.attach(part)
             
             with smtplib.SMTP(self.config.smtp_server, self.config.smtp_port) as server:

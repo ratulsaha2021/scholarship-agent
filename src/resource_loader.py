@@ -155,7 +155,8 @@ class UserResources:
                 parts.append(f"- {award}")
         
         if self.cv_text:
-            parts.append(f"\nFull CV Text:\n{self.cv_text[:3000]}")
+            # Whole CV: a cut-off CV truncates words mid-way and hides facts from the fact check
+            parts.append(f"\nFull CV Text:\n{self.cv_text[:15000]}")
         
         if self.additional_notes:
             parts.append(f"\nAdditional Notes: {self.additional_notes}")

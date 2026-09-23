@@ -4,7 +4,7 @@ import pytest
 
 from src import chat_agent as ca
 from src import email_sender as es
-from src import digest, rag_store
+from src import digest, documents, rag_store
 from src.humanizer import HumanizationResult
 from src.rag_store import PostProcessor
 from src.writer import GeneratedEmail
@@ -21,12 +21,37 @@ Email subject: PhD Application - Your Name
 
 
 class FakeLLM:
-    def __init__(self):
-        self.prompts = []
+    """Stands in for HybridLLM: canned text, but the real humanizer clean/detect runs."""
 
-    def generate(self, prompt, system="", use_groq=False):
+    OUTPUTS = {
+        "email": "Dear Professor Smith,\n\nI'd like to apply for the PhD position.\n\nBest regards,\nTest User",
+        "sop": "My research focuses on graph neural networks for medical imaging. " * 20,
+        "proposal": "# Graph learning for chest X-rays\n\n## Background and motivation\n\nPrior work exists [citation needed].\n\n## Methodology\n\nWe train models.",
+    }
+
+    def __init__(self):
+        from src.humanizer import Humanizer
+        self.prompts = []
+        self.humanizer = Humanizer()
+
+    def generate(self, prompt, system="", use_groq=False, max_tokens=2048):
         self.prompts.append(prompt)
         return "Edited email body"
+
+    def polish(self, text, kind="email", context="", max_tokens=2048, result=None):
+        result = result if result is not None else {"local_used": False, "groq_used": True}
+        text = self.humanizer.clean(text, kind)
+        issues = self.humanizer.detect(text, kind)
+        result.update({"humanized": text, "issues": issues, "rewrites": 0,
+                       "ai_analysis": {"ai_score": 0, "patterns_found": [], "suggestions": []}})
+        result.setdefault("draft", text)
+        return result
+
+    def hybrid_generate(self, prompt, context="", kind="email", max_tokens=2048):
+        self.prompts.append(prompt)
+        return self.polish(self.OUTPUTS[kind], kind, context,
+                           result={"draft": self.OUTPUTS[kind], "local_used": False, "groq_used": True,
+                                   "fallback": False, "error": ""})
 
     def get_status(self):
         return {"local_available": False, "groq_configured": False,
@@ -51,6 +76,7 @@ def agent(tmp_path, monkeypatch):
     monkeypatch.setattr(ca, "RESOURCES_DIR", tmp_path / "resources")
     monkeypatch.setattr(rag_store, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(digest, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(documents, "OUTPUT_DIR", tmp_path / "saved_responses")
     monkeypatch.setattr(es, "CONFIG_DIR", tmp_path / "config")
     monkeypatch.setattr(ca, "HybridLLM", FakeLLM)
     a = ca.ChatAgent()
@@ -93,6 +119,7 @@ def test_edit_keyword_keeps_draft_for_next_instruction(agent):
     assert agent.flow_state == "waiting_send"
     agent.chat("make it shorter")
     assert agent.pending_email.body == "Edited email body"
+    assert agent.flow_state == "waiting_send"
 
 
 def test_send_confirmation_sends(agent):
@@ -128,7 +155,7 @@ def test_cv_attached_when_present(agent):
     agent.pending_email = draft()
     agent.flow_state = "waiting_send"
     agent.chat("send")
-    assert agent.email_sender.sent[0]["attachments"] == [ca.RESOURCES_DIR / "cv.pdf"]
+    assert agent.email_sender.sent[0]["attachments"] == [(ca.RESOURCES_DIR / "cv.pdf", "Applicant_CV.pdf")]
 
 
 def test_email_credentials_are_saved(agent, monkeypatch):
@@ -159,3 +186,74 @@ def test_subject_to_contract_is_not_a_subject_line():
     assert post.metadata["subject_format"] == ""
     post = PostProcessor().process_text("PhD Studentship\nPlease use the subject line: GNN-PhD-2026\n")
     assert post.metadata["subject_format"] == "GNN-PhD-2026"
+
+
+def load_post(agent):
+    agent.resources.name = "Test User"
+    agent.resources.email = "test@example.com"
+    agent.chat(POST + "\nPlease include a statement of purpose and a research proposal.")
+
+
+def test_post_asking_for_documents_suggests_commands(agent):
+    agent.resources.name, agent.resources.email = "Test User", "t@example.com"
+    resp = agent.chat(POST + "\nApplicants must submit a statement of purpose.")
+    assert "write sop" in resp
+
+
+def test_sop_flow_asks_for_notes_then_saves_documents(agent):
+    load_post(agent)
+    resp = agent.chat("write sop")
+    assert agent.flow_state == "waiting_sop_notes" and "skip" in resp
+    resp = agent.chat("I got into ML through a TB X-ray project. I want to work on GNNs. Goal: research career.")
+    assert agent.flow_state == "reviewing_doc"
+    assert (ca.RESOURCES_DIR / "sop_notes.txt").read_text().startswith("I got into ML")
+    paths = agent.post_documents["sop"]
+    assert paths["docx"].exists() and paths["md"].exists()
+    assert "TB X-ray project" in agent.llm.prompts[-1]  # notes reach the prompt
+    assert "Statement of Purpose" in resp
+    # saved notes are reused next time without asking
+    agent.chat("done")
+    agent.chat("write sop")
+    assert agent.flow_state == "reviewing_doc"
+
+
+def test_doc_edit_revises_and_done_returns_to_idle(agent):
+    load_post(agent)
+    agent.chat("write sop")
+    agent.chat("skip")
+    resp = agent.chat("make the opening more concrete")
+    assert "Updated statement of purpose" in resp
+    assert agent.current_doc.text == "Edited email body"  # FakeLLM.generate output
+    assert "Saved" in agent.chat("done")
+    assert agent.flow_state == "idle"
+
+
+def test_proposal_flow_marks_citations(agent):
+    load_post(agent)
+    agent.chat("write proposal")
+    assert agent.flow_state == "waiting_proposal_topic"
+    resp = agent.chat("skip")
+    assert "citation needed" in resp.lower()
+    assert "proposal" in agent.post_documents
+
+
+def test_email_mentions_and_attaches_generated_documents(agent):
+    load_post(agent)
+    ca.RESOURCES_DIR.mkdir(parents=True, exist_ok=True)
+    (ca.RESOURCES_DIR / "cv.pdf").write_bytes(b"%PDF")
+    agent.chat("write sop"); agent.chat("skip"); agent.chat("done")
+    resp = agent.chat("write")
+    assert "CV, statement of purpose" in resp
+    assert "CV and statement of purpose" in agent.llm.prompts[-1]
+    agent.chat("send")
+    names = [name for _, name in agent.email_sender.sent[0]["attachments"]]
+    assert names == ["Test_User_CV.pdf", "Test_User_Statement_of_Purpose.docx"]
+
+
+def test_send_from_doc_review_sends_pending_email(agent):
+    load_post(agent)
+    agent.chat("write")
+    agent.chat("write proposal")
+    agent.chat("skip")
+    agent.chat("send")
+    assert len(agent.email_sender.sent) == 1

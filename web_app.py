@@ -52,6 +52,17 @@ def sidebar():
 
         st.divider()
 
+        docs = st.session_state.agent.saved_documents
+        if docs:
+            st.caption("Documents")
+            for i, d in enumerate(reversed(docs[-4:])):
+                path = d["paths"].get("docx") or d["paths"]["md"]
+                mime = ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        if path.suffix == ".docx" else "text/markdown")
+                st.download_button(d["label"], path.read_bytes(), file_name=path.name, mime=mime,
+                                   use_container_width=True, key=f"dl_{len(docs)}_{i}")
+            st.divider()
+
         uploaded = st.file_uploader(
             "Upload CV or Image",
             type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
@@ -76,7 +87,7 @@ def main():
     sidebar()
 
     st.title("🎓 Scholar Agent")
-    st.caption("Paste a post. I handle the rest.")
+    st.caption("Paste a post. I write the email, SOP and proposal.")
 
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
@@ -87,12 +98,15 @@ def main():
         with st.chat_message("user"):
             st.markdown(md(prompt))
 
+        docs_before = len(st.session_state.agent.saved_documents)
         with st.chat_message("assistant"):
             with st.spinner("..."):
                 resp = st.session_state.agent.chat(prompt)
             st.markdown(md(resp))
 
         st.session_state.messages.append({"role": "assistant", "content": resp})
+        if len(st.session_state.agent.saved_documents) != docs_before:
+            st.rerun()  # show the new document's download button in the sidebar
 
 
 if __name__ == "__main__":
