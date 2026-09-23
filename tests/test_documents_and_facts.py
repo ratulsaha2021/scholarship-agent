@@ -70,3 +70,42 @@ def test_context_includes_whole_cv():
     from src.resource_loader import UserResources
     r = UserResources(name="A", cv_text="x" * 5000 + " MICCAI benchmark")
     assert "MICCAI benchmark" in r.to_context_string()
+
+
+class _FakeCompletions:
+    def __init__(self, limited):
+        self.limited, self.models = limited, []
+
+    def create(self, model, **kwargs):
+        import httpx
+        from groq import RateLimitError
+        from types import SimpleNamespace as NS
+        self.models.append(model)
+        if model in self.limited:
+            req = httpx.Request("POST", "https://api.groq.com")
+            raise RateLimitError("Rate limit reached ... Please try again in 19m59.2s. org_123",
+                                 response=httpx.Response(429, request=req), body=None)
+        return NS(choices=[NS(message=NS(content=f"text from {model}"), finish_reason="stop")])
+
+
+def _llm_with(limited):
+    from types import SimpleNamespace as NS
+    llm = HybridLLM(LLMConfig(groq_api_key="x", groq_model="big", groq_fallback_model="small"))
+    completions = _FakeCompletions(limited)
+    llm._groq_client = NS(chat=NS(completions=completions))
+    return llm, completions
+
+
+def test_groq_falls_back_to_second_model_on_rate_limit():
+    llm, completions = _llm_with({"big"})
+    assert llm._call_groq("hi") == "text from small"
+    assert completions.models == ["big", "small"]
+
+
+def test_groq_rate_limit_message_is_readable_and_hides_org_id():
+    import pytest
+    llm, _ = _llm_with({"big", "small"})
+    with pytest.raises(Exception) as e:
+        llm._call_groq("hi")
+    assert "usage limit" in str(e.value) and "19m59s" in str(e.value)
+    assert "org_" not in str(e.value)

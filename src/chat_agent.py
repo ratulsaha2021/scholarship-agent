@@ -686,7 +686,9 @@ class ChatAgent:
         self.current_doc = doc
         if self.current_post:
             self.post_documents[doc.kind] = paths
-        self.saved_documents.append({"label": f"{doc.title} ({doc.post_title or 'general'})", "paths": paths})
+        post = doc.post_title or "general"
+        short = post if len(post) <= 32 else post[:30].rstrip(" ,:-") + "…"
+        self.saved_documents.append({"label": f"{doc.title} · {short}", "paths": paths})
         self.flow_state = "reviewing_doc"
 
         words = len(doc.text.split())

@@ -10,6 +10,24 @@ Paste a post, a link to one, or a screenshot, or search job sites from the chat,
 4. Lets you edit it in plain language ("make it shorter", "mention my TB paper")
 5. Sends it over SMTP with your CV attached, only after you explicitly confirm
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/01-welcome-light.png" width="49%" alt="Welcome screen, light theme">
+  <img src="docs/screenshots/08-welcome-dark.png" width="49%" alt="Welcome screen, dark theme">
+</p>
+
+| | |
+|---|---|
+| ![Live search across EURAXESS and jobs.ac.uk](docs/screenshots/03-search-results.png) | ![Post loaded from a real listing](docs/screenshots/04-post-loaded.png) |
+| **Search** live listings, ranked against your CV | **Apply** to one: the post is read straight from its page |
+| ![Application email draft](docs/screenshots/05-email-draft.png) | ![Statement of purpose](docs/screenshots/06-sop.png) |
+| **Email** draft with style and fact checks | **Statement of purpose** from your CV and notes |
+| ![Research proposal](docs/screenshots/07-proposal.png) | ![Email draft, dark theme](docs/screenshots/10-email-dark.png) |
+| **Research proposal** with downloads in the sidebar | **Dark theme** |
+
+_Screenshots use a fictional demo applicant; the job listings are real search results._
+
 ## How it works
 
 Drafting runs as a pipeline in `src/hybrid_llm.py`:
@@ -61,11 +79,12 @@ Model names and the Groq key are stored in `config/llm_config.json` (gitignored)
   "local_model": "llama3.1:8b",
   "local_base_url": "http://localhost:11434",
   "groq_api_key": "gsk_...",
-  "groq_model": "openai/gpt-oss-120b"
+  "groq_model": "openai/gpt-oss-120b",
+  "groq_fallback_model": "openai/gpt-oss-20b"
 }
 ```
 
-Groq retires models from time to time. If generation fails with `model_not_found`, pick a current model from https://console.groq.com/docs/models.
+Groq quotas are per model. If the main model hits its daily limit, the app switches to `groq_fallback_model` (default `openai/gpt-oss-20b`) automatically. Groq retires models from time to time. If generation fails with `model_not_found`, pick a current model from https://console.groq.com/docs/models.
 
 ### 3. Run
 

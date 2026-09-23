@@ -24,6 +24,14 @@ WRITER_ROLES = {
 MAX_REWRITES = 2
 
 
+def _rate_limit_message(error, models) -> str:
+    """Readable rate-limit error (the raw one includes the account's organization id)."""
+    wait = re.search(r"try again in ([\dhms.]+)", str(error))
+    when = f" Try again in about {wait.group(1).split('.')[0]}s." if wait else " Try again later."
+    return (f"Groq's usage limit is reached for {' and '.join(models)}.{when} "
+            "Or set a different groq_model in config/llm_config.json, or run a local model with Ollama.")
+
+
 def _norm(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
@@ -44,6 +52,8 @@ class LLMConfig:
     # Groq API
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
+    # Used when the main model hits a rate limit (Groq quotas are per model)
+    groq_fallback_model: str = "openai/gpt-oss-20b"
     
     @classmethod
     def load(cls) -> "LLMConfig":
@@ -68,7 +78,8 @@ class LLMConfig:
                 "local_model": self.local_model,
                 "local_base_url": self.local_base_url,
                 "groq_api_key": self.groq_api_key,
-                "groq_model": self.groq_model
+                "groq_model": self.groq_model,
+                "groq_fallback_model": self.groq_fallback_model,
             }, f, indent=2)
 
 class HybridLLM:
@@ -143,7 +154,7 @@ class HybridLLM:
             raise Exception(f"Ollama error: {response.text}")
     
     def _call_groq(self, prompt: str, system: str = "", max_tokens: int = 2048, reasoning: str = "low") -> str:
-        """Call Groq API."""
+        """Call Groq, switching to the fallback model if the main one is rate limited."""
         client = self._get_groq_client()
         if not client:
             raise Exception("Groq API not configured")
@@ -153,21 +164,32 @@ class HybridLLM:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        kwargs = {}
-        if "gpt-oss" in self.config.groq_model:
-            # Reasoning tokens count against the limit; keep reasoning short so the text isn't cut off
-            kwargs = {"reasoning_effort": reasoning, "include_reasoning": False}
-        response = client.chat.completions.create(
-            model=self.config.groq_model,
-            messages=messages,
-            max_completion_tokens=max_tokens,
-            temperature=0.7,
-            **kwargs,
-        )
-        content = response.choices[0].message.content or ""
-        if not content.strip():
-            raise Exception(f"Groq returned no text (finish reason: {response.choices[0].finish_reason})")
-        return content
+        from groq import RateLimitError
+        models = [self.config.groq_model]
+        if self.config.groq_fallback_model and self.config.groq_fallback_model != self.config.groq_model:
+            models.append(self.config.groq_fallback_model)
+
+        for i, model in enumerate(models):
+            kwargs = {}
+            if "gpt-oss" in model:
+                # Reasoning tokens count against the limit; keep reasoning short so the text isn't cut off
+                kwargs = {"reasoning_effort": reasoning, "include_reasoning": False}
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=max_tokens,
+                    temperature=0.7,
+                    **kwargs,
+                )
+            except RateLimitError as e:
+                if i + 1 < len(models):
+                    continue
+                raise Exception(_rate_limit_message(e, models)) from None
+            content = response.choices[0].message.content or ""
+            if not content.strip():
+                raise Exception(f"Groq returned no text (finish reason: {response.choices[0].finish_reason})")
+            return content
 
     def _drafting_system(self, kind: str, context: str) -> str:
         return f"""{WRITER_ROLES[kind]}
