@@ -179,6 +179,7 @@ class Humanizer:
 
     def detect(self, text: str, kind: str = "email") -> List[Issue]:
         issues: List[Issue] = []
+        text = text.replace("\u2011", "-").replace("\u2010", "-")
 
         for pid, label, strong, advice, regexes in PHRASE_PATTERNS:
             examples = []
@@ -268,6 +269,8 @@ class Humanizer:
 
     def clean(self, text: str, kind: str = "email") -> str:
         t = text.strip()
+        # Models often emit non-breaking/Unicode hyphens (U+2010/2011) and narrow spaces
+        t = t.replace("\u2011", "-").replace("\u2010", "-").replace("\u202f", " ").replace("\u00a0", " ")
         t = t.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
         t = re.sub(r"(\d)\s*[–—]\s*(\d)", r"\1-\2", t)          # number ranges keep a hyphen
         t = re.sub(r"\s*[—–]\s*|\s--\s", ", ", t)              # other dashes become commas

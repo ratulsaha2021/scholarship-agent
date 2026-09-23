@@ -1,0 +1,58 @@
+# Scholar Agent theme: deep indigo accent, Inter body, Source Serif headings.
+# Both light and dark are defined, so users can switch in the app's settings menu.
+
+[theme]
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "'Source Serif 4':https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+headingFontSizes = ["34px", "26px", "21px", "18px", "16px", "14px"]
+baseRadius = "10px"
+buttonRadius = "8px"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+
+[theme.light]
+primaryColor = "#4338CA"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F6FB"
+textColor = "#1E1B3A"
+borderColor = "#E3E4EE"
+linkColor = "#4338CA"
+codeBackgroundColor = "#EEF0F8"
+greenColor = "#15803D"
+redColor = "#B91C1C"
+orangeColor = "#B45309"
+blueColor = "#1D4ED8"
+violetColor = "#6D28D9"
+grayColor = "#6B7280"
+
+[theme.light.sidebar]
+backgroundColor = "#F5F6FB"
+secondaryBackgroundColor = "#FFFFFF"
+borderColor = "#E3E4EE"
+
+[theme.dark]
+primaryColor = "#818CF8"
+backgroundColor = "#0F1020"
+secondaryBackgroundColor = "#1A1B31"
+textColor = "#E8E8F4"
+borderColor = "#2C2D4A"
+linkColor = "#A5B4FC"
+codeBackgroundColor = "#1A1B31"
+greenColor = "#4ADE80"
+redColor = "#F87171"
+orangeColor = "#FBBF24"
+blueColor = "#60A5FA"
+violetColor = "#A78BFA"
+grayColor = "#9CA3AF"
+
+[theme.dark.sidebar]
+backgroundColor = "#14152A"
+secondaryBackgroundColor = "#1A1B31"
+borderColor = "#2C2D4A"
+
+[client]
+toolbarMode = "minimal"

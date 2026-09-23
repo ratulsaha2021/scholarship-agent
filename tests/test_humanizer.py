@@ -74,3 +74,9 @@ def test_rewrite_prompt_lists_found_issues_and_keeps_facts_rule():
 def test_repeated_openings_flagged():
     text = "I built a model. I trained it on X-rays. I published the results."
     assert "openings" in ids(text)
+
+
+def test_unicode_hyphens_are_normalised_and_detected():
+    text = "It reached state‑of‑the‑art accuracy with deep‑learning."
+    assert "sales" in ids(text)
+    assert H.clean(text) == "It reached state-of-the-art accuracy with deep-learning."
