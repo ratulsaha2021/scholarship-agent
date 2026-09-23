@@ -1,58 +1,61 @@
-# Scholar Agent theme: deep indigo accent, Inter body, Source Serif headings.
-# Both light and dark are defined, so users can switch in the app's settings menu.
+# Scholar Agent theme: minimal neutral palette (zinc grays, one near-black / near-white accent).
+# Light and dark are both defined. By default the app follows the system setting; users can
+# switch in the menu (top right, ⋮ > Settings > Theme).
 
 [theme]
-font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-headingFont = "'Source Serif 4':https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@500;600;700&display=swap"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
 baseFontSize = 15
-headingFontWeights = [700, 600, 600, 600, 600, 600]
-headingFontSizes = ["34px", "26px", "21px", "18px", "16px", "14px"]
-baseRadius = "10px"
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+headingFontSizes = ["30px", "24px", "20px", "17px", "15px", "14px"]
+baseRadius = "8px"
 buttonRadius = "8px"
 showWidgetBorder = true
 showSidebarBorder = true
-linkUnderline = false
+linkUnderline = true
 
 [theme.light]
-primaryColor = "#4338CA"
+primaryColor = "#18181B"
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F5F6FB"
-textColor = "#1E1B3A"
-borderColor = "#E3E4EE"
-linkColor = "#4338CA"
-codeBackgroundColor = "#EEF0F8"
-greenColor = "#15803D"
-redColor = "#B91C1C"
-orangeColor = "#B45309"
-blueColor = "#1D4ED8"
-violetColor = "#6D28D9"
-grayColor = "#6B7280"
+secondaryBackgroundColor = "#F6F6F7"
+textColor = "#18181B"
+borderColor = "#E4E4E7"
+linkColor = "#3F3F46"
+codeTextColor = "#3F3F46"
+codeBackgroundColor = "#F4F4F5"
+grayColor = "#71717A"
+greenColor = "#3F6F52"
+redColor = "#A33A3A"
+orangeColor = "#8A6A2F"
+blueColor = "#3F5A7A"
+violetColor = "#5B4E7A"
 
 [theme.light.sidebar]
-backgroundColor = "#F5F6FB"
+backgroundColor = "#FAFAFA"
 secondaryBackgroundColor = "#FFFFFF"
-borderColor = "#E3E4EE"
+borderColor = "#E4E4E7"
 
 [theme.dark]
-primaryColor = "#818CF8"
-backgroundColor = "#0F1020"
-secondaryBackgroundColor = "#1A1B31"
-textColor = "#E8E8F4"
-borderColor = "#2C2D4A"
-linkColor = "#A5B4FC"
-codeBackgroundColor = "#1A1B31"
-greenColor = "#4ADE80"
-redColor = "#F87171"
-orangeColor = "#FBBF24"
-blueColor = "#60A5FA"
-violetColor = "#A78BFA"
-grayColor = "#9CA3AF"
+primaryColor = "#71717A"  # mid-gray: primary buttons always use white text
+backgroundColor = "#0C0C0E"
+secondaryBackgroundColor = "#17171A"
+textColor = "#EDEDEF"
+borderColor = "#2A2A2E"
+linkColor = "#D4D4D8"
+codeTextColor = "#D4D4D8"
+codeBackgroundColor = "#1C1C20"
+grayColor = "#A1A1AA"
+greenColor = "#8FBF9F"
+redColor = "#E08A8A"
+orangeColor = "#D9B87A"
+blueColor = "#9DB4D1"
+violetColor = "#B3A8D1"
 
 [theme.dark.sidebar]
-backgroundColor = "#14152A"
-secondaryBackgroundColor = "#1A1B31"
-borderColor = "#2C2D4A"
+backgroundColor = "#111113"
+secondaryBackgroundColor = "#17171A"
+borderColor = "#2A2A2E"
 
 [client]
-toolbarMode = "minimal"
+# "viewer" keeps the Settings menu (with the light/dark switch) but hides developer options
+toolbarMode = "viewer"

@@ -11,10 +11,10 @@ AGENT_AVATAR = ":material/school:"
 UPLOAD_TYPES = ["pdf", "docx", "txt", "png", "jpg", "jpeg"]
 
 SUGGESTIONS = {
-    ":violet[:material/travel_explore:] Find ML PhD positions": "find machine learning phd",
-    ":blue[:material/person:] Show my profile": "status",
-    ":green[:material/notifications:] What's new": "digest",
-    ":orange[:material/help:] What can you do?": "help",
+    ":material/travel_explore: Find ML PhD positions": "find machine learning phd",
+    ":material/person: Show my profile": "status",
+    ":material/notifications: What's new": "digest",
+    ":material/help: What can you do?": "help",
 }
 
 STEPS = [
@@ -142,6 +142,7 @@ def sidebar():
         ]))
         if not agent.email_sender.is_configured():
             st.caption("Type `setup email gmail` to enable sending.")
+        st.caption(":material/contrast: Light or dark theme: menu **⋮** (top right).")
 
 
 def welcome():

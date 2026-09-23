@@ -73,7 +73,7 @@ Groq retires models from time to time. If generation fails with `model_not_found
 uv run streamlit run web_app.py
 ```
 
-Open http://localhost:8501. The sidebar shows your profile, the current application's progress (email, SOP, proposal), document downloads and connection status. Attach a CV or screenshot with the **+** in the chat box, and use the buttons above it to write the email, SOP or proposal for the loaded post. Light and dark themes are in `.streamlit/config.toml` (switch in the app's settings menu).
+Open http://localhost:8501. The sidebar shows your profile, the current application's progress (email, SOP, proposal), document downloads and connection status. Attach a CV or screenshot with the **+** in the chat box, and use the buttons above it to write the email, SOP or proposal for the loaded post. The theme is a minimal neutral palette with light and dark versions (`.streamlit/config.toml`). It follows your system setting; switch with the **⋮** menu at the top right (System / Light / Dark).
 
 ## Using the chat
 
